@@ -87,7 +87,6 @@ ENV/
 env.bak/
 venv.bak/
 venv-*/
-esphome-env/
 
 # mypy
 .mypy_cache/
