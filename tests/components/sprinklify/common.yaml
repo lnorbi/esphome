@@ -1,0 +1,215 @@
+esphome:
+  name: "sprinklify"
+  friendly_name: "Sprinklify"
+
+wifi:
+  ssid: "Syrel-IoT"
+  password: "aiLOGAVoyaRDLP"
+  reboot_timeout: 0s    # don't reboot if WiFi is unavailable
+
+api:
+  reboot_timeout: 0s    # don't reboot if HA is unavailable
+
+time:
+  - platform: sntp
+    id: system_time
+    timezone: "Europe/Budapest"
+
+output:
+  # --- Pump relays ---
+  - platform: gpio
+    id: pump1_relay
+    pin: ${PUMP_1_RELAY_GPIO}
+  - platform: gpio
+    id: pump2_relay
+    pin: ${PUMP_2_RELAY_GPIO}
+  - platform: gpio
+    id: pump3_relay
+    pin: ${PUMP_3_RELAY_GPIO}
+
+  # --- Per-pump indicator LEDs ---
+  - platform: gpio
+    id: pump1_led
+    pin: ${PUMP_1_LED_GPIO}
+  - platform: gpio
+    id: pump2_led
+    pin: ${PUMP_2_LED_GPIO}
+  - platform: gpio
+    id: pump3_led
+    pin: ${PUMP_3_LED_GPIO}
+
+  # --- System-level indicator LEDs ---
+  - platform: gpio
+    id: status_led_green
+    pin: ${STATUS_LED_GREEN_GPIO}
+  - platform: gpio
+    id: status_led_red
+    pin: ${STATUS_LED_RED_GPIO}
+  - platform: gpio
+    id: pressure_led
+    pin: ${PRESSURE_LED_GPIO}
+  - platform: gpio
+    id: flow_led
+    pin: ${FLOW_LED_GPIO}
+
+# ---------------------------------------------------------------------------
+# Raw hardware sensors.
+#
+# CRITICAL: update_interval must be <= 1s for the Sprinklify controller
+# to evaluate sensor conditions promptly on each 1-second tick.
+# Setting it higher introduces up to update_interval seconds of latency
+# in flow/pressure decisions. 1s is strongly recommended.
+# ---------------------------------------------------------------------------
+sensor:
+  # --- Raw pressure ADC ---
+  # !! CRITICAL: keep update_interval at 1s !!
+  # Sprinklify's 1-second tick re-evaluates pressure on every cycle.
+  # A longer interval means stale readings at decision points.
+  - platform: adc
+    id: pressure_raw      # no name — anonymous, HA never sees raw volts
+    pin: ${PRESSURE_SENSOR_GPIO}
+    update_interval: 1s   # !! DO NOT increase beyond 1s !!
+    filters:
+      - multiply: 3.3     # raw [0..1] → volts [0..3.3V] pressure sensor handles OpAmp + calibration
+
+  # --- Flow measurement (PulseMeter) ---
+  # !! CRITICAL: keep update_interval at 1s !!
+  # flow_sensor feeds is_flow_ok() which is evaluated on every tick.
+  # flow_total_sensor is read on pump stop for volume statistics.
+  - platform: pulse_meter
+    id: flow_rate             # no name - anonymous
+    pin: ${FLOW_SENSOR_GPIO}
+    unit_of_measurement: "L/min"
+    timeout: 1s
+    total:
+      id: flow_total
+      device_class: water
+      unit_of_measurement: "L"
+
+sprinklify:
+  id: sprinklify_controller
+  # --- RTC (required) ---
+  time_id: system_time
+  # --- Pressure sensor ---
+  # Self-contained: wires pressure_raw → calibration math → HA entity.
+  # device_class, unit (bar), and accuracy are fixed by the component.
+  pressure_sensor:
+    name: "System Pressure"
+    pressure_input: pressure_raw
+
+    pressure_calibration:
+      v_at_min_pressure: 0.5V     # sensor output at 0 bar (from datasheet)
+      v_at_max_pressure: 4.5V     # sensor output at p_max bar (from datasheet)
+      p_max: 10.0bar              # sensor full scale in bar
+      opamp_output_at_5v: 1.035V  # measure once per board revision
+
+    # Optional diagnostic sensors — useful for commissioning and monitoring
+    slope_sensor:
+      name: "Pressure Slope"      # bar/s — how fast pressure is changing
+    direction_sensor:
+      name: "Pressure Direction"  # rising / stable / falling
+
+    # Tune stable_threshold to your sensor's noise floor.
+    # Default 0.05 bar/s is suitable for most installations.
+    stable_threshold: 0.05
+
+  # --- Flow sensor ---
+  flow_sensor:
+    name: "Water Flow"
+    flow_input: flow_rate
+    total_input: flow_total
+    pulses_per_liter: 360
+
+  # --- System operating parameters ---
+  empty_pressure: 0.3bar        # pressure when system is empty (for better flow decisions at low pressure)
+  pump_start_pressure: 2bar
+  max_pressure: 5bar
+  min_flow_threshold: 10
+  no_flow_safety_timeout: 60s   # absolute maximum time we allow to run a pump without flow
+  dry_run_timeout: 5s           # maximum time we allow a pump to run in a confirmed dry-run condition
+  pump_start_pressure_number:
+    name: "Pump Start Pressure"
+    restore_value: true
+
+  pumps:
+    - relay: pump1_relay
+      led: pump1_led
+      max_runtime: 120min
+      max_runtime_number:
+        name: "Pump 1 Max Runtime"
+        restore_value: true
+      auto_reset_wait_time: 24h
+      auto_reset_wait_time_number:
+        name: "Pump 1 Auto-Reset Wait"
+        restore_value: true
+      state_sensor:
+        name: "Pump 1 Status"
+      reset_button:
+        name: "Reset Pump 1"
+      total_volume_sensor:
+        name: "Pump 1 Total Volume"
+      total_runtime_sensor:
+        name: "Pump 1 Total Runtime"
+
+    - relay: pump2_relay
+      led: pump2_led
+      max_runtime: 120min
+      max_runtime_number:
+        name: "Pump 2 Max Runtime"
+        restore_value: true
+      auto_reset_wait_time: 24h
+      auto_reset_wait_time_number:
+        name: "Pump 2 Auto-Reset Wait"
+        restore_value: true
+      state_sensor:
+        name: "Pump 2 Status"
+      reset_button:
+        name: "Reset Pump 2"
+      total_volume_sensor:
+        name: "Pump 2 Total Volume"
+      total_runtime_sensor:
+        name: "Pump 2 Total Runtime"
+
+    - relay: pump3_relay
+      led: pump3_led
+      max_runtime: 120min
+      max_runtime_number:
+        name: "Pump 3 Max Runtime"
+        restore_value: true
+      auto_reset_wait_time: 24h
+      auto_reset_wait_time_number:
+        name: "Pump 3 Auto-Reset Wait"
+        restore_value: true
+      state_sensor:
+        name: "Pump 3 Status"
+      reset_button:
+        name: "Reset Pump 3"
+      total_volume_sensor:
+        name: "Pump 3 Total Volume"
+      total_runtime_sensor:
+        name: "Pump 3 Total Runtime"
+
+  # --- Inter-pump delay ---
+  # Safety delay between de-energising one pump and energising the next.
+  interlock_delay: 2s
+  pump_unblock_at: "03:00"  # Optional daily unblock cycle to prevent pump seizure. Set to null to disable.
+
+# ---------------------------------------------------------------------------
+# Mode switches — declared via the Sprinklify switch sub-platform.
+# Restore modes:
+#   RESTORE_DEFAULT_ON  — remembers last state, defaults to ON on first boot
+#   RESTORE_DEFAULT_OFF — remembers last state, defaults to OFF on first boot
+# ---------------------------------------------------------------------------
+switch:
+  - platform: sprinklify
+    sprinklify_controller_id: sprinklify_controller
+    auto_mode:
+      name: "Auto Mode"
+      # restore_mode: RESTORE_DEFAULT_ON   # uncomment to override schema default
+    winter_mode:
+      name: "Winter Mode"
+      # restore_mode: RESTORE_DEFAULT_OFF  # uncomment to override schema default
+
+# binary_sensor:
+#   - platform: sprinklify
+#     sprinklify_controller_id: sprinklify_controller

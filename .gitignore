@@ -74,6 +74,7 @@ cov.xml
 
 # pyenv
 .python-version
+esphome-env/
 
 # asdf
 .tool-versions
