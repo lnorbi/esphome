@@ -36,8 +36,8 @@
 #include "sprinklify_led_indicator.h"
 #include "sprinklify_pump.h"
 
-// Populated by codegen — equals the number of pumps declared in YAML.
-// Used as the fixed array size throughout the controller.
+// Populated by codegen via cg.add_define("SPRINKLIFY_PUMP_COUNT", num_pumps).
+// Fallback of 1 is for static analysis tools and IDEs only — never used in a real build.
 #ifndef SPRINKLIFY_PUMP_COUNT
 #define SPRINKLIFY_PUMP_COUNT 1  // NOLINT(cppcoreguidelines-macro-usage)
 #endif
