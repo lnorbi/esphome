@@ -6,7 +6,7 @@ from esphome.components import (
     number,
     output,
     sensor,
-    switch,
+    switch as esphome_switch,
     text_sensor,
     time,
 )
@@ -20,6 +20,8 @@ from esphome.const import (
     CONF_MAX_VALUE,
     CONF_MIN_VALUE,
     CONF_MINUTE,
+    CONF_NAME,
+    CONF_RESTORE_MODE,
     CONF_RESTORE_VALUE,
     CONF_SECOND,
     CONF_STEP,
@@ -27,10 +29,13 @@ from esphome.const import (
     CONF_UNIT_OF_MEASUREMENT,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_PRESSURE,
+    DEVICE_CLASS_SWITCH,
     DEVICE_CLASS_VOLUME,
     DEVICE_CLASS_VOLUME_FLOW_RATE,
     ENTITY_CATEGORY_CONFIG,
     ENTITY_CATEGORY_DIAGNOSTIC,
+    ENTITY_CATEGORY_NONE,
+    ICON_POWER,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
     UNIT_LITRE,
@@ -46,6 +51,7 @@ CONF_V_AT_MIN_PRESSURE = "v_at_min_pressure"
 CONF_V_AT_MAX_PRESSURE = "v_at_max_pressure"
 CONF_P_MAX = "p_max"
 CONF_OPAMP_OUTPUT_AT_5V = "opamp_output_at_5v"
+CONF_EMA_ALPHA = "ema_alpha"
 # Pressure slope / direction
 CONF_SLOPE_SENSOR = "slope_sensor"
 CONF_DIRECTION_SENSOR = "direction_sensor"
@@ -87,11 +93,18 @@ CONF_MAX_RUNTIME = "max_runtime"
 CONF_AUTO_RESET_WAIT_TIME = "auto_reset_wait_time"
 CONF_INSTALLED_SWITCH = "installed_switch"
 CONF_RESET_BUTTON = "reset_button"
+CONF_RUN_SWITCH = "run_switch"
 CONF_TOTAL_VOLUME_SENSOR = "total_volume_sensor"
 CONF_TOTAL_RUNTIME_SENSOR = "total_runtime_sensor"
 # Per-pump number overrides
 CONF_MAX_RUNTIME_NUMBER = "max_runtime_number"
 CONF_AUTO_RESET_WAIT_TIME_NUMBER = "auto_reset_wait_time_number"
+
+# Forced restore mode for some switches
+FORCED_RESTORE_MODE = "ALWAYS_OFF"
+
+# Additional icons
+ICON_POWER_PLUG = "mdi:power-plug-outline"
 
 # ---------------------------------------------------------------------------
 # Namespace and component class declarations
@@ -114,7 +127,10 @@ SprinklifyFlowSensor = sprinklify_ns.class_(
     cg.Parented.template(SprinklifyController),
 )
 InstalledSwitch = sprinklify_ns.class_(
-    "InstalledSwitch", switch.Switch, cg.Parented.template(SprinklifyController)
+    "InstalledSwitch", esphome_switch.Switch, cg.Parented.template(SprinklifyController)
+)
+PumpRunSwitch = sprinklify_ns.class_(
+    "PumpRunSwitch", esphome_switch.Switch, cg.Parented.template(SprinklifyController)
 )
 PumpResetButton = sprinklify_ns.class_(
     "PumpResetButton", button.Button, cg.Parented.template(SprinklifyController)
@@ -155,13 +171,14 @@ PRESSURE_CALIBRATION_SCHEMA = cv.Schema(
 PRESSURE_SENSOR_SCHEMA = sensor.sensor_schema(
     SprinklifyPressureSensor,
     device_class=DEVICE_CLASS_PRESSURE,
-    entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    entity_category=ENTITY_CATEGORY_NONE,
     unit_of_measurement="bar",
     accuracy_decimals=2,
 ).extend(
     {
         cv.Required(CONF_PRESSURE_INPUT): cv.use_id(sensor.Sensor),
         cv.Required(CONF_PRESSURE_CALIBRATION): PRESSURE_CALIBRATION_SCHEMA,
+        cv.Optional(CONF_EMA_ALPHA, default=0.1): cv.float_range(min=0.01, max=1.0),
         # Slope / direction — optional; omit if not needed in HA or by hub logic
         cv.Optional(CONF_SLOPE_SENSOR): sensor.sensor_schema(
             sensor.Sensor,
@@ -184,6 +201,7 @@ FLOW_SENSOR_SCHEMA = sensor.sensor_schema(
     unit_of_measurement="L/min",
     accuracy_decimals=2,
     device_class=DEVICE_CLASS_VOLUME_FLOW_RATE,
+    entity_category=ENTITY_CATEGORY_NONE,
     state_class=STATE_CLASS_MEASUREMENT,
 ).extend(
     {
@@ -230,67 +248,98 @@ def validate_config(config):
     return config
 
 
+def validate_pump_config(pump_config):
+    if not (run_switch_config := pump_config.get(CONF_RUN_SWITCH)):
+        return pump_config
+
+    restore_mode = run_switch_config.get(CONF_RESTORE_MODE)
+    switch_name = run_switch_config.get(CONF_NAME, "Unknown")
+    if restore_mode != FORCED_RESTORE_MODE:
+        raise cv.Invalid(
+            f"Pump switch '{switch_name}': "
+            f"{CONF_RUN_SWITCH}.{CONF_RESTORE_MODE} is fixed to "
+            f"{FORCED_RESTORE_MODE}."
+        )
+    return pump_config
+
+
 # ---------------------------------------------------------------------------
 # Per-pump schema
 # ---------------------------------------------------------------------------
-PUMP_SCHEMA = cv.Schema(
-    {
-        # Hardware
-        cv.Required(CONF_RELAY): cv.use_id(output.BinaryOutput),
-        cv.Required(CONF_LED): cv.use_id(output.BinaryOutput),
-        # Reporting & control
-        cv.Optional(CONF_STATE_SENSOR): text_sensor.text_sensor_schema(
-            text_sensor.TextSensor, icon="mdi:status"
-        ),
-        cv.Optional(CONF_INSTALLED_SWITCH): switch.switch_schema(InstalledSwitch),
-        cv.Optional(CONF_RESET_BUTTON): button.button_schema(
-            PumpResetButton,
-            entity_category=ENTITY_CATEGORY_CONFIG,
-        ),
-        # Compile-time defaults
-        cv.Optional(CONF_MAX_RUNTIME, default="120m"): cv.All(
-            cv.positive_time_period_minutes,
-            cv.Range(min=core.TimePeriod(minutes=30), max=core.TimePeriod(hours=4)),
-        ),
-        cv.Optional(CONF_AUTO_RESET_WAIT_TIME): cv.All(
-            cv.positive_time_period_minutes,
-            cv.Range(min=core.TimePeriod(hours=3), max=core.TimePeriod(hours=48)),
-        ),
-        # Runtime-configurable options
-        cv.Optional(CONF_MAX_RUNTIME_NUMBER): sprinklify_number_schema(
-            unit="min",
-            min_val=30,
-            max_val=240,
-            step=10,
-            initial=120,
-            validator=cv.positive_int,
-        ),
-        cv.Optional(CONF_AUTO_RESET_WAIT_TIME_NUMBER): sprinklify_number_schema(
-            unit="h",
-            min_val=3,
-            max_val=48,
-            step=1,
-            initial=24,
-            validator=cv.positive_int,
-        ),
-        # Pump statistics
-        cv.Optional(CONF_TOTAL_VOLUME_SENSOR): sensor.sensor_schema(
-            sensor.Sensor,
-            device_class=DEVICE_CLASS_VOLUME,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            unit_of_measurement=UNIT_LITRE,
-            accuracy_decimals=1,
-            state_class=STATE_CLASS_TOTAL_INCREASING,
-        ),
-        cv.Optional(CONF_TOTAL_RUNTIME_SENSOR): sensor.sensor_schema(
-            sensor.Sensor,
-            device_class=DEVICE_CLASS_DURATION,
-            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-            unit_of_measurement=UNIT_MINUTE,
-            accuracy_decimals=0,
-            state_class=STATE_CLASS_TOTAL_INCREASING,
-        ),
-    }
+PUMP_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            # Hardware
+            cv.Required(CONF_RELAY): cv.use_id(output.BinaryOutput),
+            cv.Required(CONF_LED): cv.use_id(output.BinaryOutput),
+            # Reporting & control
+            cv.Optional(CONF_STATE_SENSOR): text_sensor.text_sensor_schema(
+                text_sensor.TextSensor, icon="mdi:status"
+            ),
+            cv.Optional(CONF_INSTALLED_SWITCH): esphome_switch.switch_schema(
+                InstalledSwitch,
+                device_class=DEVICE_CLASS_SWITCH,
+                entity_category=ENTITY_CATEGORY_NONE,
+                default_restore_mode="RESTORE_DEFAULT_ON",
+                icon=ICON_POWER_PLUG,
+            ),
+            cv.Optional(CONF_RUN_SWITCH): esphome_switch.switch_schema(
+                PumpRunSwitch,
+                device_class=DEVICE_CLASS_SWITCH,
+                entity_category=ENTITY_CATEGORY_NONE,
+                default_restore_mode=FORCED_RESTORE_MODE,
+                icon=ICON_POWER,
+            ),
+            cv.Optional(CONF_RESET_BUTTON): button.button_schema(
+                PumpResetButton,
+                entity_category=ENTITY_CATEGORY_NONE,
+            ),
+            # Compile-time defaults
+            cv.Optional(CONF_MAX_RUNTIME, default="120m"): cv.All(
+                cv.positive_time_period_minutes,
+                cv.Range(min=core.TimePeriod(minutes=30), max=core.TimePeriod(hours=4)),
+            ),
+            cv.Optional(CONF_AUTO_RESET_WAIT_TIME): cv.All(
+                cv.positive_time_period_minutes,
+                cv.Range(min=core.TimePeriod(hours=3), max=core.TimePeriod(hours=48)),
+            ),
+            # Runtime-configurable options
+            cv.Optional(CONF_MAX_RUNTIME_NUMBER): sprinklify_number_schema(
+                unit="min",
+                min_val=30,
+                max_val=240,
+                step=10,
+                initial=120,
+                validator=cv.positive_int,
+            ),
+            cv.Optional(CONF_AUTO_RESET_WAIT_TIME_NUMBER): sprinklify_number_schema(
+                unit="h",
+                min_val=3,
+                max_val=48,
+                step=1,
+                initial=24,
+                validator=cv.positive_int,
+            ),
+            # Pump statistics
+            cv.Optional(CONF_TOTAL_VOLUME_SENSOR): sensor.sensor_schema(
+                sensor.Sensor,
+                device_class=DEVICE_CLASS_VOLUME,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                unit_of_measurement=UNIT_LITRE,
+                accuracy_decimals=1,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
+            cv.Optional(CONF_TOTAL_RUNTIME_SENSOR): sensor.sensor_schema(
+                sensor.Sensor,
+                device_class=DEVICE_CLASS_DURATION,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+                unit_of_measurement=UNIT_MINUTE,
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_TOTAL_INCREASING,
+            ),
+        }
+    ),
+    validate_pump_config,
 )
 
 
@@ -306,7 +355,8 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_PRESSURE_SENSOR): PRESSURE_SENSOR_SCHEMA,
             cv.Required(CONF_FLOW_SENSOR): FLOW_SENSOR_SCHEMA,
             cv.Optional(CONF_CONTROLLER_STATE_SENSOR): text_sensor.text_sensor_schema(
-                text_sensor.TextSensor
+                text_sensor.TextSensor,
+                entity_category=ENTITY_CATEGORY_NONE,  # ← explicitly visible
             ),
             cv.Optional(CONF_STATUS_LED_GREEN): cv.use_id(output.BinaryOutput),
             cv.Optional(CONF_STATUS_LED_RED): cv.use_id(output.BinaryOutput),
@@ -410,7 +460,9 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     # Emit pump count define first — sizes the fixed C++ arrays
-    cg.add_define("SPRINKLIFY_PUMP_COUNT", len(config[CONF_PUMPS]))
+    num_pumps = len(config[CONF_PUMPS])
+    cg.add_define("SPRINKLIFY_PUMP_COUNT", num_pumps)
+    print(f"[sprinklify] SPRINKLIFY_PUMP_COUNT = {num_pumps}")
 
     cg.add(var.set_time(await cg.get_variable(config[CONF_TIME_ID])))
 
@@ -441,6 +493,8 @@ async def to_code(config):
         cg.add(pres_sensor.set_slope_sensor(slope_sens))
     # Slope stable threshold — always present (has default)
     cg.add(pres_sensor.set_stable_threshold(pres_conf[CONF_STABLE_THRESHOLD]))
+    # EMA alpha configuration
+    cg.add(pres_sensor.set_ema_alpha(pres_conf[CONF_EMA_ALPHA]))
     # Optional direction text sensor
     if CONF_DIRECTION_SENSOR in pres_conf:
         dir_sens = await text_sensor.new_text_sensor(pres_conf[CONF_DIRECTION_SENSOR])
@@ -542,22 +596,23 @@ async def to_code(config):
             sens = await text_sensor.new_text_sensor(pump_conf[CONF_STATE_SENSOR])
             cg.add(var.set_pump_state_sensor(i, sens))
 
-        if reset_btn_config := pump_conf.get(CONF_RESET_BUTTON):
-            btn = await button.new_button(reset_btn_config)
+        if CONF_RESET_BUTTON in pump_conf:
+            btn = await button.new_button(pump_conf[CONF_RESET_BUTTON])
             await cg.register_parented(btn, config[CONF_ID])
             cg.add(btn.set_pump_index(i))
 
-        # if CONF_RESET_BUTTON in pump_conf:
-        #     btn = await button.new_button(pump_conf[CONF_RESET_BUTTON])
-        #     await cg.register_parented(btn, config[CONF_ID])
-        #     cg.add(btn.set_pump_index(i))
-
         if CONF_INSTALLED_SWITCH in pump_conf:
-            sw = await switch.new_switch(pump_conf[CONF_INSTALLED_SWITCH])
+            sw = await esphome_switch.new_switch(pump_conf[CONF_INSTALLED_SWITCH])
             # await cg.register_component(sw, pump_conf[CONF_INSTALLED_SWITCH])
             await cg.register_parented(sw, config[CONF_ID])
             cg.add(sw.set_pump_index(i))
             cg.add(var.set_pump_installed_switch(i, sw))
+
+        if CONF_RUN_SWITCH in pump_conf:
+            sw = await esphome_switch.new_switch(pump_conf[CONF_RUN_SWITCH])
+            await cg.register_parented(sw, config[CONF_ID])
+            cg.add(sw.set_pump_index(i))
+            cg.add(var.set_pump_run_switch(i, sw))
 
         if CONF_TOTAL_VOLUME_SENSOR in pump_conf:
             stat = await sensor.new_sensor(pump_conf[CONF_TOTAL_VOLUME_SENSOR])

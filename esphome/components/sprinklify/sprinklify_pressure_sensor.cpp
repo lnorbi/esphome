@@ -80,22 +80,24 @@ void SprinklifyPressureSensor::on_raw_update_(float adc_volts) {
 
   // Step 2: clamp to sensor's physical range
   const float clamped = std::clamp(bar, 0.0f, this->cal_.p_max);
-  // float clamped = bar;
-  // if (clamped < 0.0f) {
-  //   clamped = 0.0f;
-  // } else if (clamped > this->cal_.p_max) {
-  //   clamped = this->cal_.p_max;
-  // }
 
-  // Step 3: update slope and direction before publishing
-  this->update_slope_(clamped, now_ms);
+  // Step 3: EMA smoothing — reduces ADC noise before slope/direction computation
+  if (std::isnan(this->ema_bar_)) {
+    this->ema_bar_ = clamped;  // seed with first real reading, no lag on startup
+  } else {
+    this->ema_bar_ = this->ema_alpha_ * clamped + (1.0f - this->ema_alpha_) * this->ema_bar_;
+  }
+  const float smoothed = this->ema_bar_;
 
-  // Step 4: publish calibrated bar value to HA.
-  this->publish_state(clamped);
+  // Step 4: update slope and direction before publishing
+  this->update_slope_(smoothed, now_ms);
 
-  // Step 5: notify hub — dry-run threshold comparison lives there, not here.
+  // Step 5: publish calibrated bar value to HA.
+  this->publish_state(smoothed);
+
+  // Step 6: notify hub — dry-run threshold comparison lives there, not here.
   // The hub owns the decision; this class owns the measurement.
-  this->parent_->on_pressure_update(clamped);
+  this->parent_->on_pressure_update(smoothed);
 }
 
 void SprinklifyPressureSensor::update_slope_(float bar, uint32_t now_ms) {
@@ -104,7 +106,7 @@ void SprinklifyPressureSensor::update_slope_(float bar, uint32_t now_ms) {
     // Store the baseline and leave direction as UNKNOWN.
     this->last_bar_ = bar;
     this->last_update_ms_ = now_ms;
-    ESP_LOGD(TAG, "Slope: first reading (%.3f bar) — direction UNKNOWN", bar);
+    ESP_LOGV(TAG, "Slope: first reading (%.3f bar) — direction UNKNOWN", bar);
     return;
   }
 
@@ -154,7 +156,7 @@ void SprinklifyPressureSensor::update_slope_(float bar, uint32_t now_ms) {
     }
 #endif
   }
-  ESP_LOGD(TAG, "Pressure direction: %s (slope=%.3f bar/s)", direction_to_str_(this->direction_), slope);
+  ESP_LOGV(TAG, "Pressure direction: %s (slope=%.3f bar/s)", direction_to_str_(this->direction_), slope);
 }
 
 const char *SprinklifyPressureSensor::direction_to_str_(PressureDirection d) {

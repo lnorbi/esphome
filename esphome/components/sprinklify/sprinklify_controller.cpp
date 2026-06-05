@@ -8,7 +8,7 @@ static const char *const TAG = "sprinklify";
 constexpr uint32_t SCHEDULER_TICK_INTERVAL_MS = 1000;
 constexpr uint32_t UNBLOCK_CYCLE_LEN_MS = 10 * 1000;  // 10 seconds
 constexpr uint32_t LED_TICK_INTERVAL_MS = 100;
-constexpr uint32_t STARTUP_WATCHDOG_MS = 6000;
+constexpr uint32_t STARTUP_DELAY_MS = 3000;
 
 // Interval/timeout IDs (uint32_t to avoid string comparison)
 enum : uint32_t {
@@ -55,7 +55,12 @@ void SprinklifyController::dump_config() {
 void SprinklifyController::setup() {
   // Setup LED timer
   this->set_interval(LED_TICK_INTERVAL_ID, LED_TICK_INTERVAL_MS, [this]() { this->led_tick_callback_(); });
-
+  // Hook up master trigger callback
+#ifdef USE_BINARY_SENSOR
+  if (this->master_trigger_ != nullptr) {
+    this->master_trigger_->add_on_state_callback([this](bool state) { this->on_master_trigger_changed(state); });
+  }
+#endif
   // Schedule daily unblock event if time is configured
   this->unblock_scheduled_event_ =
       this->scheduler_.add_daily_event(this->unblock_hour_, this->unblock_minute_, this->unblock_second_, [this]() {
@@ -70,8 +75,9 @@ void SprinklifyController::setup() {
     if (!pump->load()) {
       ESP_LOGW(TAG, "Pump %d: failed to load persistent data — initialising fresh", i);
     } else {
-      ESP_LOGI(TAG, "Pump %d: loaded — runtime=%ds  volume=%dl  fault latched=%s", i, pump->persistent.total_runtime_s,
-               pump->persistent.total_volume_l, pump->persistent.fault_latched ? "YES" : "no");
+      ESP_LOGI(TAG, "Pump %u: loaded — runtime=%" PRIu32 "s  volume=%.1fL  fault latched=%s", i,
+               pump->persistent.total_runtime_s, pump->persistent.total_volume_l,
+               pump->persistent.fault_latched ? "YES" : "no");
     }
 
     // Restore latched fault state from persistent data
@@ -79,36 +85,62 @@ void SprinklifyController::setup() {
       pump->set_status(PumpStatus::PUMP_FAULT);
       if (pump->persistent.last_fault_unix > 0 && pump->get_auto_reset_wait_time_ms() > 0) {
         const time_t reset_at = pump->persistent.last_fault_unix + pump->get_auto_reset_wait_time_ms() / 1000;
-        this->scheduler_.add_onetime_event(reset_at, [this, i]() { this->on_reset_pump(i); });
+        pump->auto_reset_event_id =
+            this->scheduler_.add_onetime_event(reset_at, [this, i]() { this->on_reset_pump(i); });
       }
+    } else {
+      pump->set_status(PumpStatus::PUMP_AVAILABLE);
     }
     pump->restore_sensors();
   }
 
   // Register HSM states
+  bool res = true;
   // clang-format off
-  HSM_REGISTER_STATE(ControllerStates::ROOT, root);
-  HSM_REGISTER_STATE( ControllerStates::OPERATIONAL, operational, ControllerStates::ROOT);
-  HSM_REGISTER_STATE(   ControllerStates::AUTO_MODE, auto_mode, ControllerStates::OPERATIONAL);
-  HSM_REGISTER_STATE(     ControllerStates::AUTO_IDLE, auto_idle, ControllerStates::AUTO_MODE);
-  HSM_REGISTER_STATE(     ControllerStates::AUTO_PUMPING, auto_pumping, ControllerStates::AUTO_MODE);
-  HSM_REGISTER_STATE(       ControllerStates::AUTO_PUMPING_WAITING_FOR_FLOW, auto_pumping_waiting_for_flow, ControllerStates::AUTO_PUMPING);
-  HSM_REGISTER_STATE(       ControllerStates::AUTO_PUMPING_RUNNING, auto_pumping_running, ControllerStates::AUTO_PUMPING);
-  HSM_REGISTER_STATE(     ControllerStates::AUTO_FAULT, auto_fault, ControllerStates::AUTO_MODE);
-  HSM_REGISTER_STATE(   ControllerStates::MANUAL_MODE, manual_mode, ControllerStates::OPERATIONAL);
-  HSM_REGISTER_STATE(     ControllerStates::MANUAL_IDLE, manual_idle, ControllerStates::MANUAL_MODE);
-  HSM_REGISTER_STATE(     ControllerStates::MANUAL_RUNNING, manual_running, ControllerStates::MANUAL_MODE);
-  HSM_REGISTER_STATE( ControllerStates::UNBLOCK_ROUTINE, unblock_routine, ControllerStates::ROOT);
-  HSM_REGISTER_STATE(   ControllerStates::UNBLOCK_SINGLE_PUMP, unblock_single_pump, ControllerStates::UNBLOCK_ROUTINE);
-  HSM_REGISTER_STATE( ControllerStates::INTERLOCK_WAIT, interlock_wait, ControllerStates::ROOT);
+  res &= HSM_REGISTER_STATE(ControllerStates::ROOT, root);
+  res &= HSM_REGISTER_STATE( ControllerStates::OPERATIONAL, operational, ControllerStates::ROOT);
+  res &= HSM_REGISTER_STATE(   ControllerStates::AUTO_MODE, auto_mode, ControllerStates::OPERATIONAL);
+  res &= HSM_REGISTER_STATE(     ControllerStates::AUTO_IDLE, auto_idle, ControllerStates::AUTO_MODE);
+  res &= HSM_REGISTER_STATE(     ControllerStates::AUTO_PUMPING, auto_pumping, ControllerStates::AUTO_MODE);
+  res &= HSM_REGISTER_STATE(       ControllerStates::AUTO_PUMPING_WAITING_FOR_FLOW, auto_pumping_waiting_for_flow, ControllerStates::AUTO_PUMPING);
+  res &= HSM_REGISTER_STATE(       ControllerStates::AUTO_PUMPING_RUNNING, auto_pumping_running, ControllerStates::AUTO_PUMPING);
+  res &= HSM_REGISTER_STATE(     ControllerStates::AUTO_FAULT, auto_fault, ControllerStates::AUTO_MODE);
+  res &= HSM_REGISTER_STATE(   ControllerStates::MANUAL_MODE, manual_mode, ControllerStates::OPERATIONAL);
+  res &= HSM_REGISTER_STATE(     ControllerStates::MANUAL_IDLE, manual_idle, ControllerStates::MANUAL_MODE);
+  res &= HSM_REGISTER_STATE(     ControllerStates::MANUAL_RUNNING, manual_running, ControllerStates::MANUAL_MODE);
+  res &= HSM_REGISTER_STATE( ControllerStates::UNBLOCK_ROUTINE, unblock_routine, ControllerStates::ROOT);
+  res &= HSM_REGISTER_STATE(   ControllerStates::UNBLOCK_SINGLE_PUMP, unblock_single_pump, ControllerStates::UNBLOCK_ROUTINE);
+  res &= HSM_REGISTER_STATE( ControllerStates::INTERLOCK_WAIT, interlock_wait, ControllerStates::ROOT);
   // clang-format on
 
+  // Check for successful HSM setup
+  if (!res) {
+    ESP_LOGE(TAG, "HSM state registration error. Controller can't start.");
+    return;
+  }
+
   // We don't start HSM until pressure sensor has a valid reading. Setup start timeout.
-  this->set_timeout(START_TIMEOUT_ID, STARTUP_WATCHDOG_MS, [this]() {
-    if (!this->hsm_.is_ready()) {
-      ESP_LOGE(TAG, "No pressure reading in %u ms. Controller can't start.", STARTUP_WATCHDOG_MS);
+  this->set_timeout(START_TIMEOUT_ID, STARTUP_DELAY_MS, [this]() {
+    if (this->is_ready_for_start_()) {
+      if (!this->hsm_.start()) {
+        ESP_LOGE(TAG, "HSM not initialized properly. Controller can't start.");
+      } else {
+        ESP_LOGI(TAG, "Controller State Machine started.");
+        // Re-evaluate master trigger — its initial state callback fired before
+        // the HSM was ready and was silently dropped. If it is active right now,
+        // we need to act on it.
+#ifdef USE_BINARY_SENSOR
+        if (this->master_trigger_ != nullptr && this->master_trigger_->has_state() && this->master_trigger_->state) {
+          ESP_LOGI(TAG, "Master trigger was active at boot — posting deferred event");
+          this->on_master_trigger_changed(true);
+        }
+#endif
+      }
+    } else {
+      ESP_LOGE(TAG, "System not ready for start after %u ms. Check sensors.", STARTUP_DELAY_MS);
     }
   });
+  ESP_LOGD(TAG, "Controller initialized. Waiting for HSM start.");
 }
 
 void SprinklifyController::on_safe_shutdown() {
@@ -146,6 +178,7 @@ HSM_STATE_HANDLER(root) {
   StateResult res = RET_HANDLED;
   switch (evt) {
     case EVT_ENTRY:
+      ESP_LOGI(TAG, "HSM started - root entry");
       // Arm scheduler tick event
       this->set_interval(SCHEDULER_TICK_INTERVAL_ID, SCHEDULER_TICK_INTERVAL_MS,
                          [this]() { this->hsm_.post_event(EVT_SCHEDULER_TICK); });
@@ -175,6 +208,9 @@ HSM_STATE_HANDLER(operational) {
   StateResult res = RET_UNHANDLED;
   switch (evt) {
     case EVT_ENTRY:
+      ESP_LOGI(TAG, "HSM - operational state entry");
+      res = RET_HANDLED;
+      break;
     case EVT_EXIT:
       res = RET_HANDLED;
       break;
@@ -216,28 +252,39 @@ HSM_STATE_HANDLER(auto_mode) {
   StateResult res = RET_UNHANDLED;
   switch (evt) {
     case EVT_ENTRY:
-      // TO REMOVE - Update optional GUI switch
-      // this->auto_mode_switch_->publish_state(true);
+      // Make sure HA pump switches are all off
+      reset_pump_switches_();
       res = RET_HANDLED;
       break;
+
     case EVT_EXIT:
       // This is fired when the auto mode switch is toggled off
-
-      // Make sure pump stopped
-      // this->stop_active_pump_();
-      // TODO Move this to MANUAL_MODE entry
-      // this->auto_mode_switch_->publish_state(false);
       res = RET_HANDLED;
       break;
+
     case EVT_INIT:
       // Take initial transition to a sub-state
-      if (this->is_pressure_ok_()) {
-        res = HSM_TRAN(ControllerStates::AUTO_IDLE);
+      if (this->is_winter_mode_()) {
+        res = HSM_TRAN(ControllerStates::AUTO_WINTER);
       } else {
-        // Not enough pressure - need a pump
-        res = HSM_TRAN(this->start_next_pump_() ? ControllerStates::AUTO_PUMPING : ControllerStates::AUTO_FAULT);
+        if (this->is_pressure_ok_()) {
+          res = HSM_TRAN(ControllerStates::AUTO_IDLE);
+        } else {
+          // Not enough pressure - need a pump
+          res = HSM_TRAN(this->start_next_pump_() ? ControllerStates::AUTO_PUMPING : ControllerStates::AUTO_FAULT);
+        }
       }
       break;
+
+    case EVT_WINTER_MODE_ACTIVE:
+      res = HSM_TRAN(ControllerStates::AUTO_WINTER);
+      break;
+
+    case EVT_WINTER_MODE_INACTIVE:
+      // Back to auto mode. Transition-to-Self pattern guarantees that initial transition is taken.
+      res = HSM_TRAN(ControllerStates::AUTO_MODE);
+      break;
+
     case EVT_MODE_CHANGE_MANUAL:
       // Move to manual state
       res = HSM_TRAN(ControllerStates::MANUAL_MODE);
@@ -250,6 +297,13 @@ HSM_STATE_HANDLER(auto_idle) {
   StateResult res = RET_UNHANDLED;
   switch (evt) {
     case EVT_ENTRY:
+      // Re-evaluate master trigger — its edge may have arrived during unblock
+      // and been swallowed. If it's currently active, act on it now.
+#ifdef USE_BINARY_SENSOR
+      if (this->master_trigger_ != nullptr && this->master_trigger_->state) {
+        this->hsm_.post_event(EVT_MASTER_TRIGGER_ACTIVE);
+      }
+#endif
       this->publish_controller_state_();
       res = RET_HANDLED;
       break;
@@ -259,6 +313,10 @@ HSM_STATE_HANDLER(auto_idle) {
 
     case EVT_PRESSURE_LOW:
       // Find and start first available pump
+      res = HSM_TRAN(this->start_next_pump_() ? ControllerStates::AUTO_PUMPING : ControllerStates::AUTO_FAULT);
+      break;
+
+    case EVT_MASTER_TRIGGER_ACTIVE:
       res = HSM_TRAN(this->start_next_pump_() ? ControllerStates::AUTO_PUMPING : ControllerStates::AUTO_FAULT);
       break;
   }
@@ -278,9 +336,8 @@ HSM_STATE_HANDLER(auto_pumping) {
       res = RET_HANDLED;
       break;
     case EVT_EXIT:
-      // float vol = this->flow_sensor_->get_total_liters();
-      // this->pumps_[this->active_pump_idx_].stop_run(vol);
-      // this->pumps_[this->active_pump_idx_].save();
+      // If we're forced to exit (e.g. due to switch to manual mode), make sure pump is off
+      this->stop_active_pump_(true, true);
       this->cancel_timeout(PUMP_MAX_RUNTIME_TIMEOUT_ID);
       res = RET_HANDLED;
       break;
@@ -300,8 +357,12 @@ HSM_STATE_HANDLER(auto_pumping) {
       res = RET_HANDLED;
       break;
 
-    case EVT_MANUAL_STOP_REQUESTED:
-      // TODO Special edge case when a manual stop received for a pump that is waiting to start up
+    case EVT_WINTER_MODE_ACTIVE:
+    case EVT_MASTER_TRIGGER_INACTIVE:
+    case EVT_MODE_CHANGE_MANUAL:
+      this->stop_active_pump_(false, false);
+      // EVT_PUMP_STOPPED → INTERLOCK_WAIT as normal
+      res = RET_HANDLED;
       break;
   }
   return res;
@@ -406,14 +467,34 @@ HSM_STATE_HANDLER(auto_fault) {
   return res;
 }
 
+/// @brief Auto - fault state handler
+HSM_STATE_HANDLER(auto_winter) {
+  StateResult res = RET_UNHANDLED;
+  switch (evt) {
+    case EVT_ENTRY:
+      this->publish_controller_state_();
+      res = RET_HANDLED;
+      break;
+  }
+  return res;
+}
+
 HSM_STATE_HANDLER(manual_mode) {
   StateResult res = RET_UNHANDLED;
   switch (evt) {
     case EVT_ENTRY:
+      // Publish switch OFF for all pump run switches to sync HA with idle reality
+      reset_pump_switches_();
       res = StateResult::RET_HANDLED;
       break;
     case EVT_EXIT:
+      // Publish switch OFF for all pump run switches to sync HA with idle reality
+      reset_pump_switches_();
       res = StateResult::RET_HANDLED;
+      break;
+    case EVT_INIT:
+      // Always start in IDLE state here
+      res = HSM_TRAN(ControllerStates::MANUAL_IDLE);
       break;
     case EVT_MODE_CHANGE_AUTO:
       res = HSM_TRAN(ControllerStates::AUTO_MODE);
@@ -432,6 +513,24 @@ HSM_STATE_HANDLER(manual_idle) {
     case EVT_EXIT:
       res = StateResult::RET_HANDLED;
       break;
+    case EVT_MANUAL_START_REQUESTED:
+      if (this->requested_pump_idx_ == NO_PUMP) {
+        ESP_LOGW(TAG, "Manual start: no pump index set — ignoring");
+        res = RET_HANDLED;
+        break;
+      }
+      if (!this->start_specific_pump_(this->requested_pump_idx_)) {
+        // Pump unavailable (faulted, not installed, etc.) — push switch back to OFF
+#ifdef USE_SWITCH
+        if (this->pumps_[this->requested_pump_idx_].run_switch != nullptr)
+          this->pumps_[this->requested_pump_idx_].run_switch->sync_state(false);
+#endif
+        this->requested_pump_idx_ = NO_PUMP;
+        res = RET_HANDLED;
+        break;
+      }
+      res = HSM_TRAN(ControllerStates::MANUAL_RUNNING);
+      break;
   }
   return res;
 }
@@ -440,11 +539,73 @@ HSM_STATE_HANDLER(manual_running) {
   StateResult res = RET_UNHANDLED;
   switch (evt) {
     case EVT_ENTRY:
+      // Arm absolute no-flow ceiling (same as auto mode)
+      this->set_timeout(NO_FLOW_SAFETY_TIMEOUT_ID, this->no_flow_safety_timeout_ms_,
+                        [this]() { this->hsm_.post_event(EVT_NO_FLOW_SAFETY_TIMEOUT_EXPIRED); });
+      // Arm max runtime (same mechanism as auto mode)
+      this->set_timeout(PUMP_MAX_RUNTIME_TIMEOUT_ID, this->pumps_[this->active_pump_idx_].get_max_runtime_ms(),
+                        [this]() { this->hsm_.post_event(EVT_PUMP_MAX_RUNTIME_REACHED); });
       this->publish_controller_state_();
       res = StateResult::RET_HANDLED;
       break;
+
     case EVT_EXIT:
+      this->cancel_timeout(NO_FLOW_SAFETY_TIMEOUT_ID);
+      this->cancel_timeout(PUMP_MAX_RUNTIME_TIMEOUT_ID);
       res = StateResult::RET_HANDLED;
+      break;
+
+    case EVT_FLOW_DETECTED:
+      // Flow confirmed — cancel dry-run timer. No-flow safety stays armed.
+      this->cancel_timeout(DRY_RUN_TIMEOUT_ID);
+      res = RET_HANDLED;
+      break;
+
+    case EVT_FLOW_LOST:
+      // Flow lost — re-arm dry-run timer. This mirrors auto mode's WaitingForFlow behaviour.
+      this->set_timeout(DRY_RUN_TIMEOUT_ID, this->dry_run_timeout_ms_,
+                        [this]() { this->hsm_.post_event(EVT_DRY_RUN_TIMEOUT_EXPIRED); });
+      res = RET_HANDLED;
+      break;
+
+    case EVT_NO_FLOW_SAFETY_TIMEOUT_EXPIRED:
+      ESP_LOGW(TAG, "Manual pump %" PRIu8 ": no-flow safety timeout — safety fault", this->active_pump_idx_);
+      this->stop_active_pump_(/*faulted=*/true, /*latched=*/false);
+      res = RET_HANDLED;
+      break;
+
+    case EVT_PUMP_MAX_RUNTIME_REACHED:
+      ESP_LOGW(TAG, "Manual pump %" PRIu8 ": max runtime reached — stopping with fault", this->active_pump_idx_);
+      this->stop_active_pump_(/*faulted=*/true, /*latched=*/true);
+      res = RET_HANDLED;
+      break;
+
+    case EVT_MANUAL_STOP_REQUESTED:
+      // Operator or HA requested stop — clean, no fault
+      ESP_LOGI(TAG, "Manual pump %" PRIu8 ": stop requested", this->active_pump_idx_);
+      this->stop_active_pump_(/*faulted=*/false, /*latched=*/false);
+      // EVT_PUMP_STOPPED → INTERLOCK_WAIT → back to MANUAL_IDLE
+      res = RET_HANDLED;
+      break;
+
+    case EVT_MODE_CHANGE_AUTO:
+      // Moving back to auto mode - stop the active pump here
+      ESP_LOGI(TAG, "Change to auto mode requested. Stopping pump %" PRIu8, this->active_pump_idx_);
+      this->stop_active_pump_(/*faulted=*/false, /*latched=*/false);
+      // EVT_PUMP_STOPPED → INTERLOCK_WAIT → back to MANUAL_IDLE
+      res = RET_HANDLED;
+      break;
+
+    // Pressure events — explicitly ignored in manual mode.
+    // They bubble up to auto_mode and operational but neither handles them
+    // while we're in MANUAL_RUNNING, so return RET_HANDLED here to stop bubbling.
+    case EVT_PRESSURE_LOW:
+    case EVT_PRESSURE_OK:
+    case EVT_PRESSURE_MAX:
+    case EVT_PRESSURE_RISING:
+    case EVT_PRESSURE_STABLE:
+    case EVT_PRESSURE_FALLING:
+      res = RET_HANDLED;
       break;
   }
   return res;
@@ -507,6 +668,13 @@ HSM_STATE_HANDLER(unblock_single_pump) {
       break;
     case EVT_UNBLOCK_CYCLE_COMPLETE:
       this->pumps_[this->active_pump_idx_].relay->turn_off();
+      // Unblock or not, we still need to respect interlock delay
+      this->set_timeout(INTERLOCK_TIMEOUT_ID, this->interlock_delay_ms_,
+                        [this]() { this->hsm_.post_event(Events::EVT_INTERLOCK_EXPIRED); });
+      res = RET_HANDLED;
+      break;
+
+    case EVT_INTERLOCK_EXPIRED:
       // Move on to next pump or exit routine if all pumps done
       if (this->active_pump_idx_ + 1 < PUMP_COUNT) {
         ++this->active_pump_idx_;
@@ -557,10 +725,10 @@ void SprinklifyController::on_pressure_update(float press) {
   this->update_binary_sensor_(BinarySensorType::PRESSURE_OK, this->is_pressure_ok_());
 #endif
 
+  ESP_LOGV(TAG, "New pressure reported: %.1f bar", press);
+
   // Stop here if HSM is not ready yet
   if (!this->hsm_.is_ready()) {
-    // HSM not ready yet - this is the first reading after boot. Start HSM here.
-    this->hsm_.start();
     return;
   }
 
@@ -586,12 +754,11 @@ void SprinklifyController::on_pressure_direction_changed(PressureDirection dir) 
     case PressureDirection::PRESSURE_FALLING:
       this->hsm_.post_event(EVT_PRESSURE_FALLING);
       break;
-    default:
-      break;
   }
 }
 
 void SprinklifyController::on_flow_update(float flow) {
+  this->flow_ = flow;
   this->flow_ok_ = flow > this->min_flow_;
   // Update sensors & LED
   this->flow_led_.set_pattern(this->flow_ok_ ? SprinklifyLEDIndicator::PATTERN_SOLID_ON
@@ -610,15 +777,16 @@ void SprinklifyController::on_auto_mode_changed(bool val) {
   if (!this->hsm_.is_ready()) {
     return;
   }
-  if (val) {
-    this->hsm_.post_event(EVT_MODE_CHANGE_AUTO);
-  } else {
-    this->hsm_.post_event(EVT_MODE_CHANGE_MANUAL);
-  }
+  ESP_LOGI(TAG, "Mode change triggered to %s mode.", val ? "AUTO" : "MANUAL");
+  this->hsm_.post_event(val ? EVT_MODE_CHANGE_AUTO : EVT_MODE_CHANGE_MANUAL);
 }
 
 void SprinklifyController::on_winter_mode_changed(bool val) {
-  // TODO: implement winter mode
+  if (!this->hsm_.is_ready()) {
+    return;
+  }
+  ESP_LOGI(TAG, "Winted mode change triggered to %s mode.", val ? "AUTO" : "MANUAL");
+  this->hsm_.post_event(val ? EVT_WINTER_MODE_ACTIVE : EVT_WINTER_MODE_INACTIVE);
 }
 
 void SprinklifyController::on_reset_pump(uint8_t pump_idx) {
@@ -632,6 +800,64 @@ void SprinklifyController::on_reset_pump(uint8_t pump_idx) {
   // Post reset event to get the controller out of fault state
   if (this->hsm_.is_ready()) {
     this->hsm_.post_event(EVT_PUMP_RESET);
+  }
+}
+
+void SprinklifyController::on_manual_pump_run_requested(uint8_t pump_idx, bool run) {
+  if (!this->hsm_.is_ready())
+    return;
+
+  if (run) {
+    // Reject if another pump is already active
+    if (this->active_pump_idx_ != NO_PUMP) {
+      ESP_LOGW(TAG, "Manual start pump %" PRIu8 ": pump %" PRIu8 " already active — ignoring", pump_idx,
+               this->active_pump_idx_);
+#ifdef USE_SWITCH
+      if (this->pumps_[pump_idx].run_switch != nullptr)
+        this->pumps_[pump_idx].run_switch->sync_state(false);
+#endif
+      return;
+    }
+    ESP_LOGI(TAG, "Manual run requested for pump %" PRIu8, pump_idx);
+    this->requested_pump_idx_ = pump_idx;
+    this->hsm_.post_event(EVT_MANUAL_START_REQUESTED);
+  } else {
+    // Only act if this is the pump that's currently running
+    if (this->active_pump_idx_ != pump_idx) {
+      // Harmless: switch turned off for a pump that wasn't running anyway
+      return;
+    }
+    ESP_LOGI(TAG, "Manual stop requested for pump %" PRIu8, pump_idx);
+    this->hsm_.post_event(EVT_MANUAL_STOP_REQUESTED);
+  }
+}
+
+void SprinklifyController::on_master_trigger_changed(bool active) {
+  if (!this->hsm_.is_ready())
+    return;
+
+  // Manual mode: master trigger is disabled — only HA controls work.
+  if (!this->is_auto_mode_()) {
+    ESP_LOGD(TAG, "Master trigger %s — ignored (manual mode)", active ? "active" : "inactive");
+    return;
+  }
+
+  if (active) {
+    if (this->active_pump_idx_ != NO_PUMP) {
+      ESP_LOGD(TAG, "Master trigger active but pump %" PRIu8 " already running — ignoring", this->active_pump_idx_);
+      return;
+    }
+    const uint8_t idx = this->get_first_available_pump_();
+    if (idx == NO_PUMP) {
+      ESP_LOGW(TAG, "Master trigger active but no pumps available");
+      return;
+    }
+    ESP_LOGI(TAG, "Master trigger: starting pump %" PRIu8, idx);
+    this->requested_pump_idx_ = idx;
+    this->hsm_.post_event(EVT_MASTER_TRIGGER_ACTIVE);
+  } else {
+    ESP_LOGI(TAG, "Master trigger inactive: requesting stop");
+    this->hsm_.post_event(EVT_MASTER_TRIGGER_INACTIVE);
   }
 }
 
@@ -701,13 +927,52 @@ void SprinklifyController::stop_active_pump_(bool faulted, bool latched) {
   pump->save();
   // Post event to HSM to trigger interlock and next steps
   this->hsm_.post_event(EVT_PUMP_STOPPED);
+  // Push run switch back to OFF so HA reflects the stopped state - only relevant in manual mode
+#ifdef USE_SWITCH
+  if (this->pumps_[this->active_pump_idx_].run_switch != nullptr)
+    this->pumps_[this->active_pump_idx_].run_switch->sync_state(false);
+#endif
+  this->active_pump_idx_ = NO_PUMP;
+}
+
+/// @brief Starts a specific pump by index (used by manual mode).
+/// Unlike start_next_pump_(), this respects the caller's pump choice but
+/// still enforces availability (not faulted, installed, relay wired).
+/// @return true if the pump was started, false if it was unavailable.
+bool SprinklifyController::start_specific_pump_(uint8_t idx) {
+  if (idx >= PUMP_COUNT) {
+    ESP_LOGW(TAG, "start_specific_pump_: index %" PRIu8 " out of range", idx);
+    return false;
+  }
+  if (!this->pumps_[idx].is_available()) {
+    ESP_LOGW(TAG, "start_specific_pump_: pump %" PRIu8 " not available (faulted or not installed)", idx);
+    return false;
+  }
+  ESP_LOGI(TAG, "Manual: starting pump %" PRIu8, idx);
+  this->active_pump_idx_ = idx;
+  auto *pump = &this->pumps_[idx];
+  pump->turn_on();
+  pump->set_status(PumpStatus::PUMP_STARTING);
+  pump->start_run();
+  this->flow_sensor_->reset_total();
+#ifdef USE_SWITCH
+  if (pump->run_switch != nullptr) {
+    pump->run_switch->sync_state(true);
+  }
+#endif
+  return true;
+}
+
+void SprinklifyController::reset_pump_switches_() {
+#ifdef USE_SWITCH
+  for (uint8_t i = 0; i < PUMP_COUNT; i++) {
+    if (this->pumps_[i].run_switch != nullptr)
+      this->pumps_[i].run_switch->sync_state(false);
+  }
+#endif
 }
 
 void SprinklifyController::publish_controller_state_() {
-#ifdef USE_TEXT_SENSOR
-  this->controller_state_sensor_->publish_state(this->state_as_str_(this->hsm_.current_state()));
-#endif
-
   uint16_t red_pattern;
   uint16_t green_pattern;
 
@@ -732,6 +997,10 @@ void SprinklifyController::publish_controller_state_() {
       red_pattern = SprinklifyLEDIndicator::PATTERN_OFF;
       green_pattern = SprinklifyLEDIndicator::PATTERN_PULSE;
       break;
+    case ControllerStates::MANUAL_RUNNING:
+      red_pattern = SprinklifyLEDIndicator::PATTERN_OFF;
+      green_pattern = SprinklifyLEDIndicator::PATTERN_DOUBLE;
+      break;
     case ControllerStates::INTERLOCK_WAIT:
       red_pattern = SprinklifyLEDIndicator::PATTERN_DOUBLE;
       green_pattern = SprinklifyLEDIndicator::PATTERN_DOUBLE;
@@ -743,6 +1012,14 @@ void SprinklifyController::publish_controller_state_() {
   }
   this->status_led_red_.set_pattern(red_pattern);
   this->status_led_green_.set_pattern(green_pattern);
+
+  ESP_LOGD(TAG, "New controller state: %s", this->state_as_str_(this->hsm_.current_state()));
+
+#ifdef USE_TEXT_SENSOR
+  if (this->controller_state_sensor_ != nullptr) {
+    this->controller_state_sensor_->publish_state(this->state_as_str_(this->hsm_.current_state()));
+  }
+#endif
 }
 
 #ifdef USE_BINARY_SENSOR

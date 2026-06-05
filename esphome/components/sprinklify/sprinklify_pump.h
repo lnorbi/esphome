@@ -18,6 +18,7 @@
 #endif
 
 #include "sprinklify_led_indicator.h"
+#include "sprinklify_entities.h"
 #include "scheduled_event.h"
 #include <cmath>
 
@@ -99,6 +100,7 @@ struct Pump {
 
 #ifdef USE_SWITCH
   switch_::Switch *installed_switch{nullptr};
+  PumpRunSwitch *run_switch{nullptr};
 #endif
 
 #ifdef USE_NUMBER
@@ -259,8 +261,8 @@ struct Pump {
   /// MUST be called before load() or save(). The hash string is a permanent
   /// contract — changing it across firmware updates silently loses all data.
   void init_pref(uint8_t pump_index) {
-    snprintf(this->unique_name_, sizeof(this->unique_name_), "sprinklify_pump_%u", pump_index);
-    this->pref = global_preferences->make_preference<PumpPersistentData>(fnv1a_hash(this->unique_name_));
+    uint32_t hash = fnv1a_hash_extend(fnv1a_hash("sprinklify_pump"), pump_index);
+    this->pref = global_preferences->make_preference<PumpPersistentData>(hash, true);
   }
 
   /// @brief Loads persistent data from NVS. Returns true if valid data was

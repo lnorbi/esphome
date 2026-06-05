@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 from esphome.components import switch
 import esphome.config_validation as cv
-from esphome.const import CONF_AUTO_MODE, ENTITY_CATEGORY_CONFIG
+from esphome.const import CONF_AUTO_MODE, ENTITY_CATEGORY_NONE
 
 from .. import (
     CONF_SPRINKLIFY_CONTROLLER_ID,
@@ -26,12 +26,13 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_AUTO_MODE): switch.switch_schema(
                 AutoModeSwitch,
                 icon=ICON_AUTO_MODE,
+                entity_category=ENTITY_CATEGORY_NONE,
                 default_restore_mode="RESTORE_DEFAULT_ON",
             ),
             cv.Optional(CONF_WINTER_MODE): switch.switch_schema(
                 WinterModeSwitch,
                 icon=ICON_WINTER_MODE,
-                entity_category=ENTITY_CATEGORY_CONFIG,
+                entity_category=ENTITY_CATEGORY_NONE,
                 default_restore_mode="RESTORE_DEFAULT_OFF",
             ),
         }

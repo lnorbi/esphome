@@ -60,6 +60,7 @@ class SprinklifyPressureSensor : public Component, public sensor::Sensor, public
   // --- Wiring setters — called from codegen before setup() ---
   void set_pressure_input(sensor::Sensor *input) { this->pressure_input_ = input; }
   void set_calibration(float v_min, float v_max, float p_max, float opamp_at_5v);
+  void set_ema_alpha(float alpha) { this->ema_alpha_ = alpha; }
   // Optional slope and direction child entities
   void set_slope_sensor(sensor::Sensor *s) { this->slope_sensor_ = s; }
   void set_stable_threshold(float val) { this->stable_threshold_ = val; }
@@ -106,6 +107,8 @@ class SprinklifyPressureSensor : public Component, public sensor::Sensor, public
 
   // --- Slope state ---
   float last_bar_{NAN};         // bar value of the previous reading
+  float ema_bar_{NAN};          // exponential moving average accumulator
+  float ema_alpha_{0.1f};       // smoothing factor: 0=max smooth, 1=no smooth
   uint32_t last_update_ms_{0};  // millis() of the previous reading
   float slope_bar_per_s_{NAN};
   PressureDirection direction_{PressureDirection::UNKNOWN};

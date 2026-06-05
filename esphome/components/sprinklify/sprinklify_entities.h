@@ -65,6 +65,35 @@ class InstalledSwitch : public switch_::Switch, public Parented<SprinklifyContro
   }
   uint8_t pump_index_{0};
 };
+
+/// @brief Per-pump manual run switch.
+/// When turned on from HA, requests the hub to start this specific pump in
+/// manual mode. When turned off, requests the hub to stop it.
+///
+/// The hub is authoritative over the actual state — it calls publish_state()
+/// back to HA once the pump actually starts/stops, so the switch reflects
+/// reality, not just the request.
+///
+/// Behaviour in auto mode: the hub ignores the event silently.
+/// Behaviour when the pump is faulted: the hub rejects the start and
+/// the switch is pushed back to OFF via publish_state(false).
+class PumpRunSwitch : public switch_::Switch, public Parented<SprinklifyController> {
+ public:
+  void set_pump_index(uint8_t idx) { pump_index_ = idx; }
+  // Called by the hub to sync HA state without triggering a callback loop.
+  void sync_state(bool state) {
+    this->hub_sync_ = true;
+    this->publish_state(state);
+    this->hub_sync_ = false;
+  }
+
+ protected:
+  void write_state(bool state) override;
+
+  uint8_t pump_index_{0};
+  bool hub_sync_{false};
+};
+
 #endif
 
 // ---------------------------------------------------------------------------

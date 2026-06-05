@@ -1,5 +1,6 @@
 #pragma once
 
+#include "esphome/core/defines.h"
 #include "esphome/core/component.h"
 // TODO: Remove this! Temporary only!!
 // #undef USE_TEXT_SENSOR
@@ -61,7 +62,11 @@ enum Events : HSMEventType {
   EVT_UNBLOCK_SCHEDULE,
   EVT_MODE_CHANGE_AUTO,
   EVT_MODE_CHANGE_MANUAL,
+  EVT_WINTER_MODE_ACTIVE,
+  EVT_WINTER_MODE_INACTIVE,
   // Sensor events
+  EVT_MASTER_TRIGGER_ACTIVE,
+  EVT_MASTER_TRIGGER_INACTIVE,
   EVT_PRESSURE_LOW,
   EVT_PRESSURE_OK,
   EVT_PRESSURE_MAX,
@@ -124,10 +129,12 @@ class SprinklifyController : public Component {
 #ifdef USE_SWITCH
   void set_auto_mode_switch(switch_::Switch *sw) { this->auto_mode_switch_ = sw; }
   void set_winter_mode_switch(switch_::Switch *sw) { this->winter_mode_switch_ = sw; }
+  void set_pump_installed_switch(uint8_t i, switch_::Switch *sw) { this->pumps_[i].installed_switch = sw; }
 #endif
 
 #ifdef USE_BINARY_SENSOR
   void set_binary_sensor(BinarySensorType type, binary_sensor::BinarySensor *sens);
+  void set_master_trigger(binary_sensor::BinarySensor *trigger) { this->master_trigger_ = trigger; }
 #endif
 
 #ifdef USE_NUMBER
@@ -152,6 +159,9 @@ class SprinklifyController : public Component {
     this->pumps_[idx].total_runtime_sensor = sens;
   }
   void set_pump_total_volume_sensor(uint8_t idx, sensor::Sensor *sens) { this->pumps_[idx].total_volume_sensor = sens; }
+#ifdef USE_SWITCH
+  void set_pump_run_switch(uint8_t i, PumpRunSwitch *sw) { this->pumps_[i].run_switch = sw; }
+#endif
 
   // -- Callbacks — called by sensors and switches when their state changes ---
   void on_auto_mode_changed(bool val);
@@ -160,6 +170,8 @@ class SprinklifyController : public Component {
   void on_pressure_direction_changed(PressureDirection dir);
   void on_flow_update(float flow);
   void on_reset_pump(uint8_t pump_idx);
+  void on_manual_pump_run_requested(uint8_t pump_idx, bool run);
+  void on_master_trigger_changed(bool active);
 
  protected:
   /// @brief Controller HSM states
@@ -173,6 +185,7 @@ class SprinklifyController : public Component {
             AUTO_PUMPING_WAITING_FOR_FLOW,
             AUTO_PUMPING_RUNNING,
           AUTO_FAULT,
+          AUTO_WINTER,
         MANUAL_MODE,
           MANUAL_IDLE,
           MANUAL_RUNNING,
@@ -201,9 +214,7 @@ class SprinklifyController : public Component {
     return std::isnan(this->pressure_) || this->pressure_ >= this->get_pump_start_pressure_();
   }
 
-  bool is_flow_ok_() const {
-    return this->flow_sensor_->has_state() && this->flow_sensor_->get_state() >= this->min_flow_;
-  }
+  bool is_flow_ok_() const { return !std::isnan(this->flow_) && this->flow_ >= this->min_flow_; }
 
   float get_pump_start_pressure_() const {
 #ifdef USE_NUMBER
@@ -221,8 +232,12 @@ class SprinklifyController : public Component {
     return this->max_pressure_;
   }
 
+  bool is_ready_for_start_() const { return !std::isnan(this->pressure_) && !std::isnan(this->flow_); }
+
   const char *state_as_str_(uint8_t state) {
     switch (state) {
+      case ControllerStates::AUTO_MODE:
+        return "auto";
       case ControllerStates::AUTO_IDLE:
         return "auto_idle";
       case ControllerStates::AUTO_PUMPING_WAITING_FOR_FLOW:
@@ -231,6 +246,10 @@ class SprinklifyController : public Component {
         return "auto_running";
       case ControllerStates::AUTO_FAULT:
         return "auto_fault";
+      case ControllerStates::AUTO_WINTER:
+        return "auto_winter";
+      case ControllerStates::MANUAL_MODE:
+        return "manual";
       case ControllerStates::MANUAL_IDLE:
         return "manual_idle";
       case ControllerStates::MANUAL_RUNNING:
@@ -250,6 +269,8 @@ class SprinklifyController : public Component {
   bool start_next_pump_();
   void stop_active_pump_(bool faulted, bool latched);
   uint8_t get_first_available_pump_() const;
+  bool start_specific_pump_(uint8_t idx);
+  void reset_pump_switches_();
 
 #ifdef USE_BINARY_SENSOR
   void update_binary_sensor_(BinarySensorType type, bool value);
@@ -269,13 +290,13 @@ class SprinklifyController : public Component {
   HSM_STATE_HANDLER_DECL(auto_pumping_waiting_for_flow);
   HSM_STATE_HANDLER_DECL(auto_pumping_running);
   HSM_STATE_HANDLER_DECL(auto_fault);
+  HSM_STATE_HANDLER_DECL(auto_winter);
   HSM_STATE_HANDLER_DECL(manual_mode);
   HSM_STATE_HANDLER_DECL(manual_idle);
   HSM_STATE_HANDLER_DECL(manual_running);
   HSM_STATE_HANDLER_DECL(unblock_routine);
   HSM_STATE_HANDLER_DECL(unblock_single_pump);
   HSM_STATE_HANDLER_DECL(interlock_wait);
-  // HSM_STATE_HANDLER_DECL(unblock_complete);
 
   HSM hsm_{ControllerStates::ROOT};
 
@@ -295,6 +316,7 @@ class SprinklifyController : public Component {
   // Sensors and controls used by controller
   SprinklifyPressureSensor *pressure_sensor_{nullptr};
   SprinklifyFlowSensor *flow_sensor_{nullptr};
+
   // LEDs
   SprinklifyLEDIndicator status_led_red_;
   SprinklifyLEDIndicator status_led_green_;
@@ -308,6 +330,7 @@ class SprinklifyController : public Component {
 
 #ifdef USE_BINARY_SENSOR
   binary_sensor::BinarySensor *binary_sensors_[(size_t) BinarySensorType::BINARY_SENSOR_TYPE_COUNT]{nullptr};
+  binary_sensor::BinarySensor *master_trigger_{nullptr};
 #endif
 
 #ifdef USE_NUMBER
@@ -322,10 +345,12 @@ class SprinklifyController : public Component {
   /// Pumps and pump management
   Pump pumps_[PUMP_COUNT]{};  // All pumps in the system
   uint8_t active_pump_idx_{NO_PUMP};
+  uint8_t requested_pump_idx_{NO_PUMP};  // set before posting EVT_MANUAL_START_REQUESTED
   uint32_t interlock_delay_ms_{0};
 
   // Latest sensor readings and derived values
   float pressure_{NAN};
+  float flow_{NAN};
   float empty_pressure_{0.0f};
   float pump_start_pressure_{0.0f};
   float max_pressure_{0.0f};

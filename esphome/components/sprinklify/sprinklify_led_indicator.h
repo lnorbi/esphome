@@ -62,6 +62,9 @@ struct SprinklifyLEDIndicator {
   /// giving a clean, predictable transition regardless of when in the cycle
   /// the change occurs.
   void set_pattern(uint16_t pattern) {
+    if (this->pattern_ == pattern) {
+      return;
+    }
     this->pattern_ = pattern;
     this->bit_ = 0;
   }
@@ -80,18 +83,26 @@ struct SprinklifyLEDIndicator {
   /// Must be called at a fixed interval (100 ms recommended) for patterns
   /// to produce the correct timing. Safe to call when output_ is nullptr.
   void tick() {
-    if (this->output_ == nullptr)
+    if (this->output_ == nullptr) {
       return;
+    }
     const bool state = (this->pattern_ >> this->bit_) & 1U;
-    this->output_->set_state(state);
+    if (state) {
+      this->output_->turn_on();
+    } else {
+      this->output_->turn_off();
+    }
+
+    // this->output_->set_state(true);
     this->bit_ = (this->bit_ + 1) & 15U;  // circular 0..15
   }
 
   /// @brief Forces the output to a known off state immediately, without
   /// advancing the pattern cursor. Useful for safe shutdown or OTA.
   void force_off() {
-    if (this->output_ == nullptr)
+    if (this->output_ == nullptr) {
       return;
+    }
     this->output_->set_state(false);
   }
 

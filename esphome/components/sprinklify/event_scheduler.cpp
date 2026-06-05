@@ -64,8 +64,8 @@ bool EventScheduler::remove_event(uint16_t id) {
 }
 
 void EventScheduler::process_events(const ESPTime &time) {
-  for (auto &event : this->events_) {
-    event.process(time);
+  for (size_t i = 0; i < this->count_; i++) {
+    this->events_[i].process(time);
   }
 
   // Compact the array: shift live events forward over removed slots.
