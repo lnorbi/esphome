@@ -3,6 +3,8 @@
 namespace esphome {
 namespace sprinklify {
 
+static const char *const TAG = "auto_mode.switch";
+
 void AutoModeSwitch::setup() {
   auto initial = this->get_initial_state_with_restore_mode();
   if (initial.has_value()) {
@@ -10,11 +12,11 @@ void AutoModeSwitch::setup() {
   }
 }
 
+void AutoModeSwitch::dump_config() { LOG_SWITCH("  ", "AutoMode Switch", this); }
+
 void AutoModeSwitch::write_state(bool state) {
-  // if (this->parent_->get_auto_mode() != state) {
-  // }
-  this->parent_->on_auto_mode_changed(state);
   this->publish_state(state);
+  this->parent_->on_auto_mode_changed(state);
 }
 
 }  // namespace sprinklify

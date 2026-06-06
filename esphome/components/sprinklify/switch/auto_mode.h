@@ -9,7 +9,7 @@ namespace sprinklify {
 class AutoModeSwitch : public switch_::Switch, public Component, public Parented<SprinklifyController> {
  public:
   void setup() override;
-  AutoModeSwitch() = default;
+  void dump_config() override;
 
  protected:
   void write_state(bool state) override;

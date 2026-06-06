@@ -42,6 +42,7 @@ struct SprinklifyLEDIndicator {
   static constexpr uint16_t PATTERN_BLINK_FAST = 0b0101010101010101;
   static constexpr uint16_t PATTERN_PULSE = 0b0000000000000001;
   static constexpr uint16_t PATTERN_DOUBLE = 0b0000000100000001;
+  static constexpr uint16_t PATTERN_DOUBLE_PULSE = 0b0000000000000101;
   static constexpr uint16_t PATTERN_TRIPLE = 0b0000000100010001;
 
   // ---------------------------------------------------------------------------

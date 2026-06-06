@@ -1,6 +1,5 @@
 #include "sprinklify_pressure_sensor.h"
-#include "sprinklify_controller.h"  // included here, not in the header,
-                                    // to avoid circular dependency
+#include "sprinklify_controller.h"
 #include "esphome/core/log.h"
 #include <algorithm>  // std::max, std::min
 #include <cmath>      // std::isnan
@@ -58,7 +57,10 @@ void SprinklifyPressureSensor::dump_config() {
   ESP_LOGCONFIG(TAG, "    V at p_max:    %.2f V", this->cal_.v_max);
   ESP_LOGCONFIG(TAG, "    p_max:         %.2f bar", this->cal_.p_max);
   ESP_LOGCONFIG(TAG, "    OpAmp scale:   %.4f", this->cal_.opamp_scale);
-  ESP_LOGCONFIG(TAG, "  Stable threshold: %.3f bar/s", this->stable_threshold_);
+  ESP_LOGCONFIG(TAG, "  EMA alpha:         %.3f", this->ema_alpha_);
+  ESP_LOGCONFIG(TAG, "  Slope window:      %u samples", this->slope_window_size_);
+  ESP_LOGCONFIG(TAG, "  Stable threshold:  %.3f bar/s", this->stable_threshold_);
+  ESP_LOGCONFIG(TAG, "  Dir. hysteresis:   %.3f bar/s", this->direction_hysteresis_);
   ESP_LOGCONFIG(TAG, "  Slope sensor:     %s", this->slope_sensor_ != nullptr ? "yes" : "no");
 #ifdef USE_TEXT_SENSOR
   ESP_LOGCONFIG(TAG, "  Direction sensor: %s", this->direction_sensor_ != nullptr ? "yes" : "no");
@@ -78,86 +80,170 @@ void SprinklifyPressureSensor::on_raw_update_(float adc_volts) {
   // Step 1: calculate bar from volts using calibration constants
   const float bar = adc_volts * this->cal_.adc_to_bar_scale + this->cal_.adc_to_bar_offset;
 
-  // Step 2: clamp to sensor's physical range
-  const float clamped = std::clamp(bar, 0.0f, this->cal_.p_max);
-
-  // Step 3: EMA smoothing — reduces ADC noise before slope/direction computation
+  // Step 2: EMA smoothing — reduces ADC noise before slope/direction computation
   if (std::isnan(this->ema_bar_)) {
-    this->ema_bar_ = clamped;  // seed with first real reading, no lag on startup
+    this->ema_bar_ = bar;  // seed with first real reading, no lag on startup
   } else {
-    this->ema_bar_ = this->ema_alpha_ * clamped + (1.0f - this->ema_alpha_) * this->ema_bar_;
+    this->ema_bar_ = this->ema_alpha_ * bar + (1.0f - this->ema_alpha_) * this->ema_bar_;
   }
-  const float smoothed = this->ema_bar_;
+
+  // Step 3: clamp to sensor's physical range
+  const float clamped = std::clamp(this->ema_bar_, 0.0f, this->cal_.p_max);
 
   // Step 4: update slope and direction before publishing
-  this->update_slope_(smoothed, now_ms);
+  this->update_slope_(clamped, now_ms);
 
-  // Step 5: publish calibrated bar value to HA.
-  this->publish_state(smoothed);
+  // Step 5: publish calibrated bar value to HA. - Mind the recommended filters in YAML to throttle this
+  this->publish_state(clamped);
 
   // Step 6: notify hub — dry-run threshold comparison lives there, not here.
   // The hub owns the decision; this class owns the measurement.
-  this->parent_->on_pressure_update(smoothed);
+  this->parent_->on_pressure_update(clamped);
 }
 
+// ---------------------------------------------------------------------------
+// Windowed slope + hysteretic direction
+// ---------------------------------------------------------------------------
+
 void SprinklifyPressureSensor::update_slope_(float bar, uint32_t now_ms) {
-  if (std::isnan(this->last_bar_)) {
-    // First reading — no previous value to diff against.
-    // Store the baseline and leave direction as UNKNOWN.
-    this->last_bar_ = bar;
-    this->last_update_ms_ = now_ms;
+  // --- Write new sample into circular buffer ---
+  this->slope_window_[this->slope_write_idx_] = {bar, now_ms};
+  this->slope_write_idx_ = (this->slope_write_idx_ + 1) % this->slope_window_size_;
+  if (this->slope_fill_count_ < this->slope_window_size_) {
+    ++this->slope_fill_count_;
+  }
+
+  // Need at least 2 samples before we can compute a slope
+  if (this->slope_fill_count_ < 2) {
     ESP_LOGV(TAG, "Slope: first reading (%.3f bar) — direction UNKNOWN", bar);
     return;
   }
 
-  // Elapsed time in seconds using actual millis() diff.
-  // This is always more accurate than the configured update_interval
-  // because it reflects real scheduler timing, not the nominal interval.
-  const uint32_t elapsed_ms = now_ms - this->last_update_ms_;
+  // --- Compute slope over the full window (newest minus oldest) ---
+  // Write index now points one past the slot we just wrote, which is also the
+  // oldest slot once the buffer is full (circular buffer invariant).
+  // When not yet full, the oldest slot is index 0.
 
-  if (elapsed_ms == 0) {
-    // Defensive: avoid division by zero if two readings arrive simultaneously
-    return;
+  // --- Collect window samples in chronological order ---
+  // Start from the oldest slot and walk forward.
+  const uint8_t n = this->slope_fill_count_;
+  const uint8_t oldest_idx =
+      (n < this->slope_window_size_) ? 0 : this->slope_write_idx_;  // write_idx already advanced past oldest
+
+  const float t_origin_ms = static_cast<float>(this->slope_window_[oldest_idx].ms);
+
+  float sum_t = 0.0f;   // Σt   (seconds, relative to oldest)
+  float sum_y = 0.0f;   // Σy   (bar)
+  float sum_tt = 0.0f;  // Σt²
+  float sum_ty = 0.0f;  // Σ(t·y)
+
+  for (uint8_t i = 0; i < n; ++i) {
+    const uint8_t idx = (oldest_idx + i) % this->slope_window_size_;
+    const float t = (static_cast<float>(this->slope_window_[idx].ms) - t_origin_ms) / 1000.0f;
+    const float y = this->slope_window_[idx].bar;
+    sum_t += t;
+    sum_y += y;
+    sum_tt += t * t;
+    sum_ty += t * y;
   }
 
-  const float elapsed_s = elapsed_ms / 1000.0f;
-  const float slope = (bar - this->last_bar_) / elapsed_s;
+  const float fn = static_cast<float>(n);
+  const float denom = fn * sum_tt - sum_t * sum_t;
 
-  // Update state
+  float slope = 0.0f;
+  if (std::fabs(denom) > 1e-6f) {
+    slope = (fn * sum_ty - sum_t * sum_y) / denom;  // bar/s
+  }
+
+  // --- Optional light EMA on slope output ---
+  if (this->slope_ema_alpha_ < 1.0f) {
+    if (std::isnan(this->slope_ema_)) {
+      this->slope_ema_ = slope;
+    } else {
+      this->slope_ema_ += this->slope_ema_alpha_ * (slope - this->slope_ema_);
+    }
+    slope = this->slope_ema_;
+  }
   this->slope_bar_per_s_ = slope;
-  this->last_bar_ = bar;
-  this->last_update_ms_ = now_ms;
 
-  // Classify direction using the configurable stability threshold
-  PressureDirection new_direction;
-  if (slope > this->stable_threshold_) {
-    new_direction = PressureDirection::PRESSURE_RISING;
-  } else if (slope < -this->stable_threshold_) {
-    new_direction = PressureDirection::PRESSURE_FALLING;
-  } else {
-    new_direction = PressureDirection::PRESSURE_STABLE;
-  }
-
-  // Publish slope entity if wired — every reading
+  // Publish raw slope to diagnostic sensor every reading
   if (this->slope_sensor_ != nullptr) {
     this->slope_sensor_->publish_state(slope);
   }
 
-  // Publish direction entity only on change to avoid history spam
-  if (new_direction != this->direction_) {
-    this->direction_ = new_direction;
-    // Notify controller of direction change — single authoritative source
-    this->parent_->on_pressure_direction_changed(new_direction);
-
-#ifdef USE_TEXT_SENSOR
-    // Post to HA
-    if (this->direction_sensor_ != nullptr) {
-      this->direction_sensor_->publish_state(direction_to_str_(this->direction_));
-    }
-#endif
-  }
-  ESP_LOGV(TAG, "Pressure direction: %s (slope=%.3f bar/s)", direction_to_str_(this->direction_), slope);
+  // Calculate direction changes
+  this->update_direction_(slope);
 }
+
+void SprinklifyPressureSensor::update_direction_(float slope) {
+  // --- Hysteretic direction candidate ---
+  //
+  // Entry  (leaving STABLE):  |slope| crosses stable_threshold_  outward
+  // Exit   (back to STABLE):  |slope| drops below stable_threshold_ - direction_hysteresis_
+  //
+  // RISING ↔ FALLING routes through STABLE.
+
+  PressureDirection candidate = this->direction_;
+  const float inner = this->stable_threshold_ - this->direction_hysteresis_;
+
+  switch (this->direction_) {
+    case PressureDirection::UNKNOWN:
+    case PressureDirection::PRESSURE_STABLE:
+      if (slope > this->stable_threshold_)
+        candidate = PressureDirection::PRESSURE_RISING;
+      else if (slope < -this->stable_threshold_)
+        candidate = PressureDirection::PRESSURE_FALLING;
+      else
+        candidate = PressureDirection::PRESSURE_STABLE;
+      break;
+    case PressureDirection::PRESSURE_RISING:
+      if (slope < inner)
+        candidate = PressureDirection::PRESSURE_STABLE;
+      break;
+    case PressureDirection::PRESSURE_FALLING:
+      if (slope > -inner)
+        candidate = PressureDirection::PRESSURE_STABLE;
+      break;
+  }
+
+  // --- Debounce ---
+  //
+  // Required hold count depends on whether we are entering a directional
+  // state or returning to STABLE.
+  const bool exiting_to_stable = (candidate == PressureDirection::PRESSURE_STABLE);
+  const uint8_t required = exiting_to_stable ? this->debounce_exit_count_ : this->debounce_enter_count_;
+
+  if (candidate == this->direction_) {
+    // Candidate matches committed direction — reset debounce state.
+    this->pending_direction_ = this->direction_;
+    this->debounce_count_ = 0;
+  } else if (candidate == this->pending_direction_) {
+    // Candidate is consistent with the pending change — advance counter.
+    ++this->debounce_count_;
+    if (this->debounce_count_ >= required) {
+      // Held long enough — commit.
+      this->direction_ = candidate;
+      this->pending_direction_ = candidate;
+      this->debounce_count_ = 0;
+      this->parent_->on_pressure_direction_changed(this->direction_);
+#ifdef USE_TEXT_SENSOR
+      if (this->direction_sensor_ != nullptr)
+        this->direction_sensor_->publish_state(direction_to_str_(this->direction_));
+#endif
+    }
+  } else {
+    // Candidate changed before the previous one was committed — start fresh.
+    this->pending_direction_ = candidate;
+    this->debounce_count_ = 1;
+  }
+
+  ESP_LOGV(TAG, "slope=%.4f  committed=%s  pending=%s  count=%u/%u", slope, direction_to_str_(this->direction_),
+           direction_to_str_(this->pending_direction_), this->debounce_count_, required);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 const char *SprinklifyPressureSensor::direction_to_str_(PressureDirection d) {
   switch (d) {

@@ -26,11 +26,10 @@ namespace esphome {
 namespace sprinklify {
 
 enum class PumpStatus : uint8_t {
-  PUMP_AVAILABLE,    // idle, no fault, can be requested
-  PUMP_STARTING,     // energised, waiting for flow to confirm
-  PUMP_RUNNING,      // flow confirmed, operating normally
-  PUMP_FAULT,        // latched fault — requires reset before next run
-  PUMP_UNAVAILABLE,  // reserved for future use (e.g. maintenance mode)
+  PUMP_AVAILABLE,      // idle, no fault, can be requested
+  PUMP_RUNNING,        // flow confirmed, operating normally
+  PUMP_FAULT,          // latched fault — requires reset before next run
+  PUMP_NOT_INSTALLED,  // pump physically disconnected
 };
 
 constexpr float MINUTES_TO_MILLISECONDS = 60.0f * 1000.0f;
@@ -122,7 +121,7 @@ struct Pump {
   PumpStatus status{PumpStatus::PUMP_AVAILABLE};
   uint32_t run_start_ms{0};                        // millis() at energise; 0 = not running
   uint16_t auto_reset_event_id{INVALID_EVENT_ID};  // ID of pending auto-reset event, or INVALID_EVENT_ID if none
-  char unique_name_[24] = "UNKNOWN";
+  bool faulted{false};
 
   // =========================================================================
   // Configuration accessors — resolve Number override or fall back to
@@ -154,8 +153,7 @@ struct Pump {
 #endif
     return true;
   }
-  bool is_available() const { return this->is_installed() && this->status == PumpStatus::PUMP_AVAILABLE; }
-  bool is_faulted() const { return this->status == PumpStatus::PUMP_FAULT; }
+  bool is_available() const { return this->is_installed() && !this->faulted; }
 
   // =========================================================================
   // Status — single setter keeps state sensor and LED always in sync
@@ -172,6 +170,16 @@ struct Pump {
       this->state_sensor->publish_state(this->pump_status_to_str_(new_status));
     }
 #endif
+  }
+
+  void reconcile_status() {
+    if (!this->is_installed()) {
+      this->set_status(PumpStatus::PUMP_NOT_INSTALLED);
+    } else if (this->faulted) {
+      this->set_status(PumpStatus::PUMP_FAULT);
+    } else {
+      this->set_status(PumpStatus::PUMP_AVAILABLE);
+    }
   }
 
   // =========================================================================
@@ -231,22 +239,20 @@ struct Pump {
   /// latched = false for dry-run faults (auto-reset eligible).
   /// Caller must call save() after this.
   void record_fault(bool latched, time_t fault_unix) {
+    this->faulted = true;
     this->persistent.fault_latched = latched;
     this->persistent.last_fault_unix = fault_unix;
-  }
-
-  void clear_fault() {
-    this->persistent.fault_latched = false;
-    this->persistent.last_fault_unix = 0;
   }
 
   /// @brief Clears fault state, persists to NVS, and sets status to AVAILABLE.
   /// Does not cancel any pending scheduler events — the controller handles that.
   void reset() {
-    this->clear_fault();
+    this->faulted = false;
+    this->persistent.fault_latched = false;
+    this->persistent.last_fault_unix = 0;
     this->auto_reset_event_id = INVALID_EVENT_ID;  // invalidate any pending auto-reset event
     this->save();
-    this->set_status(PumpStatus::PUMP_AVAILABLE);
+    this->reconcile_status();
   }
 
   // =========================================================================
@@ -287,14 +293,12 @@ struct Pump {
     switch (s) {
       case PumpStatus::PUMP_AVAILABLE:
         return "available";
-      case PumpStatus::PUMP_STARTING:
-        return "starting";
       case PumpStatus::PUMP_RUNNING:
         return "running";
       case PumpStatus::PUMP_FAULT:
         return "fault";
-      case PumpStatus::PUMP_UNAVAILABLE:
-        return "unavailable";
+      case PumpStatus::PUMP_NOT_INSTALLED:
+        return "not_installed";
       default:
         return "unknown";
     }
@@ -305,12 +309,12 @@ struct Pump {
     switch (s) {
       case PumpStatus::PUMP_AVAILABLE:
         return SprinklifyLEDIndicator::PATTERN_OFF;
-      case PumpStatus::PUMP_STARTING:
-        return SprinklifyLEDIndicator::PATTERN_BLINK_FAST;
       case PumpStatus::PUMP_RUNNING:
         return SprinklifyLEDIndicator::PATTERN_SOLID_ON;
       case PumpStatus::PUMP_FAULT:
         return SprinklifyLEDIndicator::PATTERN_PULSE;
+      case PumpStatus::PUMP_NOT_INSTALLED:
+        return SprinklifyLEDIndicator::PATTERN_DOUBLE_PULSE;
       default:
         return SprinklifyLEDIndicator::PATTERN_OFF;
     }

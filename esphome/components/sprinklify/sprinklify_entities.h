@@ -54,15 +54,15 @@ class PumpResetButton : public button::Button, public Parented<SprinklifyControl
 /// State is persisted in PumpPersistentData (NVS) — hub owns the persistence.
 /// DISABLED restore_mode prevents the switch restoring itself on boot;
 /// hub calls publish_state(persistent.installed) explicitly in setup().
-class InstalledSwitch : public switch_::Switch, public Parented<SprinklifyController> {
+class PumpInstalledSwitch : public switch_::Switch, public Component, public Parented<SprinklifyController> {
  public:
+  void setup() override;
+  void dump_config() override;
+
   void set_pump_index(uint8_t idx) { pump_index_ = idx; }
 
  protected:
-  void write_state(bool state) override {
-    this->publish_state(state);
-    // this->parent_->on_pump_installed_changed(pump_index_, state);
-  }
+  void write_state(bool state) override;
   uint8_t pump_index_{0};
 };
 
@@ -77,8 +77,10 @@ class InstalledSwitch : public switch_::Switch, public Parented<SprinklifyContro
 /// Behaviour in auto mode: the hub ignores the event silently.
 /// Behaviour when the pump is faulted: the hub rejects the start and
 /// the switch is pushed back to OFF via publish_state(false).
-class PumpRunSwitch : public switch_::Switch, public Parented<SprinklifyController> {
+class PumpRunSwitch : public switch_::Switch, public Component, public Parented<SprinklifyController> {
  public:
+  void dump_config() override;
+
   void set_pump_index(uint8_t idx) { pump_index_ = idx; }
   // Called by the hub to sync HA state without triggering a callback loop.
   void sync_state(bool state) {

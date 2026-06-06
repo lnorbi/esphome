@@ -52,17 +52,21 @@ CONF_V_AT_MAX_PRESSURE = "v_at_max_pressure"
 CONF_P_MAX = "p_max"
 CONF_OPAMP_OUTPUT_AT_5V = "opamp_output_at_5v"
 CONF_EMA_ALPHA = "ema_alpha"
+CONF_STABLE_THRESHOLD = "stable_threshold"
+CONF_SLOPE_WINDOW_SIZE = "slope_window_size"
+CONF_DIRECTION_HYSTERESIS = "direction_hysteresis"
+CONF_DEBOUNCE_ENTER_COUNT = "debounce_enter_count"
+CONF_DEBOUNCE_EXIT_COUNT = "debounce_exit_count"
 # Pressure slope / direction
 CONF_SLOPE_SENSOR = "slope_sensor"
 CONF_DIRECTION_SENSOR = "direction_sensor"
-CONF_STABLE_THRESHOLD = "stable_threshold"
 
 # Flow sensor sub-schema
 CONF_FLOW_INPUT = "flow_input"
 CONF_TOTAL_INPUT = "total_input"
 
 # Controller-level config keys
-CONF_CONTROLLER_STATE_SENSOR = "controller_state_sensor"
+CONF_STATE_TEXT_SENSOR = "state_text_sensor"
 CONF_PRESSURE_SENSOR = "pressure_sensor"
 CONF_FLOW_SENSOR = "flow_sensor"
 CONF_ENABLE_SWITCH = "enable_switch"
@@ -88,7 +92,6 @@ CONF_MAX_PRESSURE_NUMBER = "max_pressure_number"
 # Per-pump config key names
 CONF_SPRINKLIFY_CONTROLLER_ID = "sprinklify_controller_id"
 CONF_RELAY = "relay"
-CONF_STATE_SENSOR = "state_sensor"
 CONF_MAX_RUNTIME = "max_runtime"
 CONF_AUTO_RESET_WAIT_TIME = "auto_reset_wait_time"
 CONF_INSTALLED_SWITCH = "installed_switch"
@@ -126,11 +129,17 @@ SprinklifyFlowSensor = sprinklify_ns.class_(
     sensor.Sensor,
     cg.Parented.template(SprinklifyController),
 )
-InstalledSwitch = sprinklify_ns.class_(
-    "InstalledSwitch", esphome_switch.Switch, cg.Parented.template(SprinklifyController)
+PumpInstalledSwitch = sprinklify_ns.class_(
+    "PumpInstalledSwitch",
+    esphome_switch.Switch,
+    cg.Component,
+    cg.Parented.template(SprinklifyController),
 )
 PumpRunSwitch = sprinklify_ns.class_(
-    "PumpRunSwitch", esphome_switch.Switch, cg.Parented.template(SprinklifyController)
+    "PumpRunSwitch",
+    esphome_switch.Switch,
+    cg.Component,
+    cg.Parented.template(SprinklifyController),
 )
 PumpResetButton = sprinklify_ns.class_(
     "PumpResetButton", button.Button, cg.Parented.template(SprinklifyController)
@@ -179,6 +188,10 @@ PRESSURE_SENSOR_SCHEMA = sensor.sensor_schema(
         cv.Required(CONF_PRESSURE_INPUT): cv.use_id(sensor.Sensor),
         cv.Required(CONF_PRESSURE_CALIBRATION): PRESSURE_CALIBRATION_SCHEMA,
         cv.Optional(CONF_EMA_ALPHA, default=0.1): cv.float_range(min=0.01, max=1.0),
+        cv.Optional(CONF_SLOPE_WINDOW_SIZE, default=4): cv.int_range(min=2, max=8),
+        cv.Optional(CONF_DIRECTION_HYSTERESIS, default=0.015): cv.float_range(min=0.0),
+        cv.Optional(CONF_DEBOUNCE_ENTER_COUNT, default=3): cv.int_range(min=1, max=10),
+        cv.Optional(CONF_DEBOUNCE_EXIT_COUNT, default=2): cv.int_range(min=1, max=10),
         # Slope / direction — optional; omit if not needed in HA or by hub logic
         cv.Optional(CONF_SLOPE_SENSOR): sensor.sensor_schema(
             sensor.Sensor,
@@ -273,11 +286,12 @@ PUMP_SCHEMA = cv.All(
             cv.Required(CONF_RELAY): cv.use_id(output.BinaryOutput),
             cv.Required(CONF_LED): cv.use_id(output.BinaryOutput),
             # Reporting & control
-            cv.Optional(CONF_STATE_SENSOR): text_sensor.text_sensor_schema(
-                text_sensor.TextSensor, icon="mdi:status"
+            cv.Optional(CONF_STATE_TEXT_SENSOR): text_sensor.text_sensor_schema(
+                text_sensor.TextSensor,
+                entity_category=ENTITY_CATEGORY_NONE,
             ),
             cv.Optional(CONF_INSTALLED_SWITCH): esphome_switch.switch_schema(
-                InstalledSwitch,
+                PumpInstalledSwitch,
                 device_class=DEVICE_CLASS_SWITCH,
                 entity_category=ENTITY_CATEGORY_NONE,
                 default_restore_mode="RESTORE_DEFAULT_ON",
@@ -354,7 +368,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
             cv.Required(CONF_PRESSURE_SENSOR): PRESSURE_SENSOR_SCHEMA,
             cv.Required(CONF_FLOW_SENSOR): FLOW_SENSOR_SCHEMA,
-            cv.Optional(CONF_CONTROLLER_STATE_SENSOR): text_sensor.text_sensor_schema(
+            cv.Optional(CONF_STATE_TEXT_SENSOR): text_sensor.text_sensor_schema(
                 text_sensor.TextSensor,
                 entity_category=ENTITY_CATEGORY_NONE,  # ← explicitly visible
             ),
@@ -487,14 +501,17 @@ async def to_code(config):
             cal[CONF_OPAMP_OUTPUT_AT_5V],
         )
     )
+    # Filtering / smoothing / slope detection configuration
+    cg.add(pres_sensor.set_stable_threshold(pres_conf[CONF_STABLE_THRESHOLD]))
+    cg.add(pres_sensor.set_ema_alpha(pres_conf[CONF_EMA_ALPHA]))
+    cg.add(pres_sensor.set_slope_window_size(pres_conf[CONF_SLOPE_WINDOW_SIZE]))
+    cg.add(pres_sensor.set_direction_hysteresis(pres_conf[CONF_DIRECTION_HYSTERESIS]))
+    cg.add(pres_sensor.set_debounce_enter_count(pres_conf[CONF_DEBOUNCE_ENTER_COUNT]))
+    cg.add(pres_sensor.set_debounce_exit_count(pres_conf[CONF_DEBOUNCE_EXIT_COUNT]))
     # Optional slope sensor
     if CONF_SLOPE_SENSOR in pres_conf:
         slope_sens = await sensor.new_sensor(pres_conf[CONF_SLOPE_SENSOR])
         cg.add(pres_sensor.set_slope_sensor(slope_sens))
-    # Slope stable threshold — always present (has default)
-    cg.add(pres_sensor.set_stable_threshold(pres_conf[CONF_STABLE_THRESHOLD]))
-    # EMA alpha configuration
-    cg.add(pres_sensor.set_ema_alpha(pres_conf[CONF_EMA_ALPHA]))
     # Optional direction text sensor
     if CONF_DIRECTION_SENSOR in pres_conf:
         dir_sens = await text_sensor.new_text_sensor(pres_conf[CONF_DIRECTION_SENSOR])
@@ -556,10 +573,8 @@ async def to_code(config):
         )
         cg.add(var.set_max_pressure_number(num))
 
-    if CONF_CONTROLLER_STATE_SENSOR in config:
-        state_sens = await text_sensor.new_text_sensor(
-            config[CONF_CONTROLLER_STATE_SENSOR]
-        )
+    if CONF_STATE_TEXT_SENSOR in config:
+        state_sens = await text_sensor.new_text_sensor(config[CONF_STATE_TEXT_SENSOR])
         cg.add(var.set_controller_state_sensor(state_sens))
 
     if CONF_STATUS_LED_GREEN in config:
@@ -592,8 +607,8 @@ async def to_code(config):
                 auto_reset,
             )
         )
-        if CONF_STATE_SENSOR in pump_conf:
-            sens = await text_sensor.new_text_sensor(pump_conf[CONF_STATE_SENSOR])
+        if CONF_STATE_TEXT_SENSOR in pump_conf:
+            sens = await text_sensor.new_text_sensor(pump_conf[CONF_STATE_TEXT_SENSOR])
             cg.add(var.set_pump_state_sensor(i, sens))
 
         if CONF_RESET_BUTTON in pump_conf:
@@ -603,13 +618,14 @@ async def to_code(config):
 
         if CONF_INSTALLED_SWITCH in pump_conf:
             sw = await esphome_switch.new_switch(pump_conf[CONF_INSTALLED_SWITCH])
-            # await cg.register_component(sw, pump_conf[CONF_INSTALLED_SWITCH])
+            await cg.register_component(sw, pump_conf[CONF_INSTALLED_SWITCH])
             await cg.register_parented(sw, config[CONF_ID])
             cg.add(sw.set_pump_index(i))
             cg.add(var.set_pump_installed_switch(i, sw))
 
         if CONF_RUN_SWITCH in pump_conf:
             sw = await esphome_switch.new_switch(pump_conf[CONF_RUN_SWITCH])
+            await cg.register_component(sw, pump_conf[CONF_RUN_SWITCH])
             await cg.register_parented(sw, config[CONF_ID])
             cg.add(sw.set_pump_index(i))
             cg.add(var.set_pump_run_switch(i, sw))

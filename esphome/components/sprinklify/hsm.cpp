@@ -18,6 +18,7 @@ static const char *const TAG = "sprinklify.hsm";
 bool HSM::register_state(HSMStateType state, StateHandler handler, HSMStateType parent) {
   if (state >= MAX_STATES) {
     ESP_LOGE(TAG, "register_state: state %u exceeds MAX_STATES (%u)", state, MAX_STATES);
+    this->registration_error_ = true;
     return false;
   }
 
@@ -27,6 +28,7 @@ bool HSM::register_state(HSMStateType state, StateHandler handler, HSMStateType 
   if (parent == STATE_INVALID) {
     if (state != this->root_state_) {
       ESP_LOGE(TAG, "register_state: state %u has no parent but is not the root state (%u)", state, this->root_state_);
+      this->registration_error_ = true;
       return false;
     }
     sd.parent_state = STATE_INVALID;
@@ -47,6 +49,7 @@ bool HSM::register_state(HSMStateType state, StateHandler handler, HSMStateType 
                "register_state: state %u — parent chain broken at %u "
                "(not registered or out of range). Register parents before children.",
                state, p);
+      this->registration_error_ = true;
       return false;
     }
     p = STATE_(p).parent_state;
@@ -69,6 +72,10 @@ bool HSM::register_state(HSMStateType state, StateHandler handler, HSMStateType 
 bool HSM::start() {
   if (this->initialized_) {
     ESP_LOGW(TAG, "start() called on an already-running HSM — ignored");
+    return false;
+  }
+  if (this->registration_error_) {
+    ESP_LOGE(TAG, "start() called but there were state registration errors");
     return false;
   }
   if (!STATE_(this->root_state_).registered) {

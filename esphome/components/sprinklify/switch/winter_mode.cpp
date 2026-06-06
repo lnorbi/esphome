@@ -12,13 +12,11 @@ void WinterModeSwitch::setup() {
   }
 }
 
-void WinterModeSwitch::dump_config() { log_switch(TAG, "  ", "WinterMode" /* this->name_ */, this); }
+void WinterModeSwitch::dump_config() { LOG_SWITCH("  ", "WinterMode Switch", this); }
 
 void WinterModeSwitch::write_state(bool state) {
-  // if (this->parent_->get_winter_mode() != state) {
-  // }
-  this->parent_->on_winter_mode_changed(state);
   this->publish_state(state);
+  this->parent_->on_winter_mode_changed(state);
 }
 
 }  // namespace sprinklify

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <functional>
+#include "esphome/core/component.h"
 #include <array>
 #include <cstddef>
 
@@ -74,6 +74,7 @@ class HSM {
   inline HSMStateType current_state() const { return this->current_state_; }
   inline bool is_ready() const { return this->initialized_; }
   inline bool is_idle() const { return this->queue_head_ == this->queue_tail_ && !this->transition_pending_; }
+  inline bool is_registered() const { return !this->registration_error_; }
 
  private:
   struct StateDescriptor {
@@ -103,6 +104,7 @@ class HSM {
 
   bool transition_pending_{false};
   bool initialized_{false};
+  bool registration_error_{false};
 };
 
 }  // namespace sprinklify

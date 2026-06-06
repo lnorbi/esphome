@@ -2,12 +2,6 @@
 
 #include "esphome/core/defines.h"
 #include "esphome/core/component.h"
-// TODO: Remove this! Temporary only!!
-// #undef USE_TEXT_SENSOR
-// #undef USE_BINARY_SENSOR
-// #undef USE_NUMBER
-// #undef USE_SWITCH
-// -------------
 #include "esphome/core/automation.h"
 #include "esphome/core/preferences.h"
 #include "esphome/core/helpers.h"
@@ -170,6 +164,7 @@ class SprinklifyController : public Component {
   void on_pressure_direction_changed(PressureDirection dir);
   void on_flow_update(float flow);
   void on_reset_pump(uint8_t pump_idx);
+  void on_pump_installed_changed(uint8_t pump_idx, bool run);
   void on_manual_pump_run_requested(uint8_t pump_idx, bool run);
   void on_master_trigger_changed(bool active);
 

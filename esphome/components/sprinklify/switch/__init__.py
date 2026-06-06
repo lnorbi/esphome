@@ -5,15 +5,26 @@ from esphome.const import CONF_AUTO_MODE, ENTITY_CATEGORY_NONE
 
 from .. import (
     CONF_SPRINKLIFY_CONTROLLER_ID,
+    SprinklifyController,
     SprinklifyControllerItemBaseSchema,
     sprinklify_ns,
 )
 
 CODEOWNERS = ["@lnorbi"]
-AutoModeSwitch = sprinklify_ns.class_("AutoModeSwitch", switch.Switch)
-WinterModeSwitch = sprinklify_ns.class_("WinterModeSwitch", switch.Switch)
+AutoModeSwitch = sprinklify_ns.class_(
+    "AutoModeSwitch",
+    switch.Switch,
+    cg.Component,
+    cg.Parented.template(SprinklifyController),
+)
+WinterModeSwitch = sprinklify_ns.class_(
+    "WinterModeSwitch",
+    switch.Switch,
+    cg.Component,
+    cg.Parented.template(SprinklifyController),
+)
 
-# Haier switches
+# Sprinklify switches
 CONF_WINTER_MODE = "winter_mode"
 
 # Additional icons
@@ -47,5 +58,6 @@ async def to_code(config):
         if conf := config.get(switch_type):
             sw_var = await switch.new_switch(conf)
             await cg.register_parented(sw_var, parent)
+            await cg.register_component(sw_var, conf)
             # below a call is formulated like this: set_auto_mode_switch
             cg.add(getattr(parent, f"set_{switch_type}_switch")(sw_var))

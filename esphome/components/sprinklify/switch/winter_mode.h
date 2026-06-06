@@ -10,7 +10,6 @@ class WinterModeSwitch : public switch_::Switch, public Component, public Parent
  public:
   void setup() override;
   void dump_config() override;
-  WinterModeSwitch() = default;
 
  protected:
   void write_state(bool state) override;
