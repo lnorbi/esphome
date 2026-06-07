@@ -468,6 +468,9 @@ HSM_STATE_HANDLER(auto_winter) {
       this->publish_controller_state_();
       res = RET_HANDLED;
       break;
+    case EVT_EXIT:
+      res = RET_HANDLED;
+      break;
   }
   return res;
 }
@@ -1015,6 +1018,10 @@ void SprinklifyController::publish_controller_state_() {
     case ControllerStates::AUTO_FAULT:
       red_pattern = SprinklifyLEDIndicator::PATTERN_BLINK_SLOW;
       green_pattern = SprinklifyLEDIndicator::PATTERN_OFF;
+      break;
+    case ControllerStates::AUTO_WINTER:
+      red_pattern = SprinklifyLEDIndicator::PATTERN_PULSE;
+      green_pattern = SprinklifyLEDIndicator::PATTERN_PULSE;
       break;
     case ControllerStates::MANUAL_IDLE:
       red_pattern = SprinklifyLEDIndicator::PATTERN_OFF;
