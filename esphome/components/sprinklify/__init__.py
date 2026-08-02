@@ -180,6 +180,7 @@ PRESSURE_CALIBRATION_SCHEMA = cv.Schema(
 PRESSURE_SENSOR_SCHEMA = sensor.sensor_schema(
     SprinklifyPressureSensor,
     device_class=DEVICE_CLASS_PRESSURE,
+    state_class=STATE_CLASS_MEASUREMENT,
     entity_category=ENTITY_CATEGORY_NONE,
     unit_of_measurement="bar",
     accuracy_decimals=2,
@@ -594,6 +595,8 @@ async def to_code(config):
     for i, pump_conf in enumerate(config[CONF_PUMPS]):
         relay = await cg.get_variable(pump_conf[CONF_RELAY])
         led = await cg.get_variable(pump_conf[CONF_LED])
+        # This is the constant (config-based) entry for auto_reset_wait_time.
+        # The number entity is separate
         if CONF_AUTO_RESET_WAIT_TIME in pump_conf:
             auto_reset = pump_conf[CONF_AUTO_RESET_WAIT_TIME].total_milliseconds
         else:

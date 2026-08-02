@@ -1,19 +1,46 @@
-esphome:
-  name: "sprinklify"
-  friendly_name: "Sprinklify"
+substitutions:
+  name: "sprinklify-controller"
+  friendly_name: "Sprinklify Controller"
 
-wifi:
-  ssid: "Syrel-IoT"
-  password: "aiLOGAVoyaRDLP"
-  reboot_timeout: 0s    # don't reboot if WiFi is unavailable
+  # GPIO mappings config
+  PUMP_1_RELAY_GPIO: GPIO27
+  PUMP_2_RELAY_GPIO: GPIO26
+  PUMP_3_RELAY_GPIO: GPIO25
+  PUMP_1_LED_GPIO: GPIO19
+  PUMP_2_LED_GPIO: GPIO21
+  PUMP_3_LED_GPIO: GPIO23
+  PRESSURE_SENSOR_GPIO: GPIO34
+  PRESSURE_LED_GPIO: GPIO18
+  FLOW_SENSOR_GPIO: GPIO35
+  FLOW_LED_GPIO: GPIO16
+  MASTER_TRIGGER_GPIO: GPIO39
+  STATUS_LED_RED_GPIO: GPIO5
+  STATUS_LED_GREEN_GPIO: GPIO17
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: true
 
 api:
   reboot_timeout: 0s    # don't reboot if HA is unavailable
 
+wifi:
+  ap:
+    ssid: "Sprinklify Setup"
+    password: "12345678"
+  reboot_timeout: 0s    # don't reboot if WiFi is unavailable
+
+captive_portal:
+
+improv_serial:
+
+ota:
+  - platform: esphome
+
 time:
   - platform: sntp
     id: system_time
-    timezone: "Europe/Budapest"
 
 output:
   # --- Pump relays ---

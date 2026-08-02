@@ -943,10 +943,15 @@ void SprinklifyController::stop_active_pump_(bool faulted, bool latched) {
   if (faulted) {
     pump->record_fault(latched, this->now_);
     pump->reconcile_status();
-    // Arm auto-reset for this pump
+    // Arm auto-reset for this pump if auto_reset_wait_time specified
     uint8_t i = this->active_pump_idx_;
-    const time_t reset_at = this->now_ + this->pumps_[i].get_auto_reset_wait_time_ms() / 1000;
-    pump->auto_reset_event_id = this->scheduler_.add_onetime_event(reset_at, [this, i]() { this->on_reset_pump(i); });
+    const uint32_t auto_reset_ms = this->pumps_[i].get_auto_reset_wait_time_ms();
+    if (auto_reset_ms > 0) {
+      const time_t reset_at = this->now_ + this->pumps_[i].get_auto_reset_wait_time_ms() / 1000;
+      pump->auto_reset_event_id = this->scheduler_.add_onetime_event(reset_at, [this, i]() { this->on_reset_pump(i); });
+    } else {
+      pump->auto_reset_event_id = INVALID_EVENT_ID;
+    }
   } else {
     pump->reconcile_status();
   }
